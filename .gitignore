@@ -1,0 +1,10 @@
+output_dtu/
+*.pcd
+*.dump
+*.png
+*.jpg
+__pycache__
+*.o
+*.so
+submodules/diff-plane-rasterization/diff_plane_rasterization.egg-info/
+submodules/diff-plane-rasterization/third_party/glm/

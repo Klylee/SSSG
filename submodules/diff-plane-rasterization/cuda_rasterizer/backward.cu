@@ -508,7 +508,7 @@ renderCUDA(
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
 	float last_all_map[MAP_N] = { 0 };
-	float last_depth = { 0 };
+	float last_depth = 0;
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
@@ -607,15 +607,19 @@ renderCUDA(
 					// many that were affected by this Gaussian.
 					atomicAdd(&(dL_dall_map[global_id * MAP_N + ch]), dchannel_dcolor * dL_dchannel);
 				}
-				// atomicAdd(&(dL_dall_map[global_id * MAP_N + 0]), dL_dout_plane_depths[pix_id] * delta.x / normal_view.z * dchannel_dcolor);
-				// atomicAdd(&(dL_dall_map[global_id * MAP_N + 1]), dL_dout_plane_depths[pix_id] * delta.y / normal_view.z * dchannel_dcolor);
-				// atomicAdd(&(dL_dall_map[global_id * MAP_N + 2]), 
-				// 	dL_dout_plane_depths[pix_id] * -(delta.x * normal_view.x + delta.y * normal_view.y) / (normal_view.z * normal_view.z) * dchannel_dcolor);
-				
-				atomicAdd(&(dL_dmeans3D_view[global_id].x), dL_dout_plane_depths[pix_id] * normal_view.x / normal_view.z * dchannel_dcolor);
-				atomicAdd(&(dL_dmeans3D_view[global_id].y), dL_dout_plane_depths[pix_id] * normal_view.y / normal_view.z * dchannel_dcolor);
-				atomicAdd(&(dL_dmeans3D_view[global_id].z), dL_dout_plane_depths[pix_id] * dchannel_dcolor);
-
+				if (depth <=5 && depth > 0) {
+					atomicAdd(&(dL_dall_map[global_id * MAP_N + 0]), dL_dout_plane_depths[pix_id] * delta.x / normal_view.z * dchannel_dcolor);
+					atomicAdd(&(dL_dall_map[global_id * MAP_N + 1]), dL_dout_plane_depths[pix_id] * delta.y / normal_view.z * dchannel_dcolor);
+					atomicAdd(&(dL_dall_map[global_id * MAP_N + 2]), 
+						dL_dout_plane_depths[pix_id] * -(delta.x * normal_view.x + delta.y * normal_view.y) / (normal_view.z * normal_view.z) * dchannel_dcolor);
+					
+					atomicAdd(&(dL_dmeans3D_view[global_id].x), dL_dout_plane_depths[pix_id] * normal_view.x / normal_view.z * dchannel_dcolor);
+					atomicAdd(&(dL_dmeans3D_view[global_id].y), dL_dout_plane_depths[pix_id] * normal_view.y / normal_view.z * dchannel_dcolor);
+					atomicAdd(&(dL_dmeans3D_view[global_id].z), dL_dout_plane_depths[pix_id] * dchannel_dcolor);
+				}
+				else {
+					atomicAdd(&(dL_dmeans3D_view[global_id].z), dchannel_dcolor * dL_dout_plane_depth);
+				}
 				// float3 delta = { mean3D_view.x - pix_view.x, mean3D_view.y - pix_view.y, mean3D_view.z - pix_view.z };
 				// float depth = (delta.x * normal_view.x + delta.y * normal_view.y + delta.z * normal_view.z) / normal_view.z;
 				// if (depth >= 0 && depth <= 5) {
@@ -626,6 +630,13 @@ renderCUDA(
 				// 	dL_dalpha += (depth - accum_depth) * dL_dchannel;
 				// }
 				
+				// if depth = mean3D_view.z
+				// const float c = mean3D_view.z;
+				// accum_depth = last_alpha * last_depth + (1.f - last_alpha) * accum_depth;
+				// last_depth = c;
+				// const float dL_dchannel = dL_dout_plane_depth;
+				// dL_dalpha += (c - accum_depth) * dL_dchannel;
+				// atomicAdd(&(dL_dmeans3D_view[global_id].z), dchannel_dcolor * dL_dchannel);
 			}
 			
 			dL_dalpha *= T;

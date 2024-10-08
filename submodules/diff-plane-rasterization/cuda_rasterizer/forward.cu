@@ -376,7 +376,7 @@ renderCUDA(
 			// float depth = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
 			float depth = (delta.x * normal_view.x + delta.y * normal_view.y) / (normal_view.z + 1.0e-5) + delta.z;
 			// float depth = mean3D_view.z;
-			if (depth < 0 || depth > 5) depth = 0;
+			if (depth < 0 || depth > 5) depth = mean3D_view.z;
 			// float depth = normal_view.z;
 			// depth = fabs(depth);
 

@@ -91,7 +91,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             image_height=int(viewpoint_camera.image_height),
             image_width=int(viewpoint_camera.image_width),
             tanfovx=tanfovx,
-            tanfovy=tanfovy,
+            tanfovy=tanfovy, 
             bg=bg_color,
             scale_modifier=scaling_modifier,
             viewmatrix=viewpoint_camera.world_view_transform,
@@ -131,13 +131,13 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     global_normal = pc.get_normal(viewpoint_camera)
     local_normal = global_normal @ viewpoint_camera.world_view_transform[:3,:3]
-    pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
-    depth_z = pts_in_cam[:, 2]
-    local_distance = (local_normal * pts_in_cam).sum(-1).abs()
+    # pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
+    # depth_z = pts_in_cam[:, 2]
+    # local_distance = (local_normal * pts_in_cam).sum(-1).abs()
     input_all_map = torch.zeros((means3D.shape[0], 5)).cuda().float()
     input_all_map[:, :3] = F.normalize(local_normal)
     input_all_map[:, 3] = 1.0
-    input_all_map[:, 4] = local_distance
+    # input_all_map[:, 4] = local_distance
 
     rendered_image, radii, out_observe, out_all_map, plane_depth = rasterizer(
         means3D = means3D,

@@ -8,3 +8,4 @@ __pycache__
 *.so
 submodules/diff-plane-rasterization/diff_plane_rasterization.egg-info/
 submodules/diff-plane-rasterization/third_party/glm/
+dtu/

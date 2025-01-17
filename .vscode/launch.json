@@ -10,8 +10,10 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "args": [
-                "-m", "output_dtu/dtu_scan24/test"
+                "-s", "~/expdata/neuralto/yuanbao",
+                "-m", "output_neuralto/yuanbao/test"
             ]
         }
     ]

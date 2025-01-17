@@ -209,13 +209,21 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
 
+    if transformsfile == 'transforms_train.json':
+        image_set = 'train'
+    elif transformsfile == 'transforms_test.json':
+        image_set = 'test'
+
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
         fovx = contents["camera_angle_x"]
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
-            cam_name = os.path.join(path, frame["file_path"] + extension)
+            if '.png' not in frame['file_path']:
+                cam_name = os.path.join(path + '/' + image_set, frame["file_path"] + extension)
+            else:
+                cam_name = os.path.join(path + '/' + image_set, frame["file_path"])
 
             # NeRF 'transform_matrix' is a camera-to-world transform
             c2w = np.array(frame["transform_matrix"])
@@ -238,13 +246,15 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             norm_data = im_data / 255.0
             arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
             image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
-
-            fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+            
+            fx = fov2focal(fovx, image.size[0])
+            fovy = focal2fov(fx, image.size[1])
             FovY = fovy 
             FovX = fovx
+            fy = fov2focal(fovy, image.size[1])
 
-            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1], fx=fx, fy=fy))
             
     return cam_infos
 

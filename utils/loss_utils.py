@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 import numpy as np
+from kornia.filters import laplacian, spatial_gradient
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -139,3 +140,18 @@ def lncc(ref, nea):
     ncc = torch.mean(ncc, dim=1, keepdim=True)
     mask = (ncc < 0.9)
     return ncc, mask
+
+def first_order_edge_aware_loss(data, img):
+    return (spatial_gradient(data.unsqueeze(0), order=1)[0].abs() * torch.exp(-spatial_gradient(img.unsqueeze(0), order=1)[0].abs())).sum(1).mean()
+
+def first_order_edge_aware_norm_loss(data, img):
+    return (spatial_gradient(data[None], order=1)[0].abs() * torch.exp(-spatial_gradient(img[None], order=1)[0].norm(dim=1, keepdim=True))).sum(1).mean()
+
+def first_order_loss(data):
+    return spatial_gradient(data[None], order=1)[0].abs().sum(1).mean()
+
+# def tv_loss(depth):
+#     # return spatial_gradient(data[None], order=2)[0, :, [0, 2]].abs().sum(1).mean()
+#     h_tv = torch.square(depth[..., 1:, :] - depth[..., :-1, :]).mean()
+#     w_tv = torch.square(depth[..., :, 1:] - depth[..., :, :-1]).mean()
+#     return h_tv + w_tv

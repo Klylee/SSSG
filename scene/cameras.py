@@ -62,6 +62,13 @@ class Camera(nn.Module):
         self.ncc_scale = ncc_scale
         if self.preload_img:
             image = Image.open(self.image_path)
+            # image = image.convert('RGBA')
+
+            # width, height = image.size
+            # black_image = Image.new('RGBA', (width, height), (0, 0, 0, 255))
+            # image = Image.alpha_composite(black_image, image)
+            # image = image.convert('RGB')
+
             resized_image = image.resize((image_width, image_height))
             resized_image_rgb = PILtoTorch(resized_image)
             if ncc_scale != 1.0:
@@ -72,13 +79,14 @@ class Camera(nn.Module):
             self.image_gray = resized_image_gray.clamp(0.0, 1.0).to(self.data_device)
 
             # for DTU
-            mask_path = image_path.replace("images", "mask")[:-10]
-            mask_path = mask_path + image_path[-7:]
+            path_split = image_path.split('/')
+            mask_path = os.path.join('/'.join(path_split[:-2]), 'mask')
+            mask_path = os.path.join(mask_path, self.image_name + '.png')
             if os.path.exists(mask_path):
                 self.mask = torch.tensor(cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)).to(self.data_device).squeeze()/255
                 self.mask = erode(self.mask[None,None].float()).squeeze()
                 self.mask = torch.nn.functional.interpolate(self.mask[None,None], size=(image_height,image_width), mode='bilinear', align_corners=False).squeeze()
-                self.mask = (self.mask < 0.5).to(self.data_device)
+                self.mask = (self.mask >= 0.5).to(self.data_device)
 
         self.image_width = image_width
         self.image_height = image_height
@@ -97,9 +105,11 @@ class Camera(nn.Module):
         self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
-        self.camera_center = self.world_view_transform.inverse()[3, :3]
         self.plane_mask, self.non_plane_mask = None, None
+        self.c2w = self.world_view_transform.inverse()
+        self.camera_center = self.c2w[3, :3]
 
+    
     def get_image(self):
         if self.preload_img:
             return self.original_image.cuda(), self.image_gray.cuda()

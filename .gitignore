@@ -1,4 +1,5 @@
 output_dtu/
+output_neuralto/
 *.pcd
 *.dump
 *.png

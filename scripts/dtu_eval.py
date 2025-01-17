@@ -6,6 +6,18 @@ from scipy.io import loadmat
 import multiprocessing as mp
 import argparse, os, csv
 
+print("Current working directory:", os.getcwd())
+import sys
+sys.path.append(os.getcwd())
+from scene.dataset_readers import readCamerasFromTransforms
+from arguments import ModelParams
+
+from pathlib import Path
+from utils.camera_utils import cameraList_from_camInfos
+import torch
+import torch.nn.functional as F
+import trimesh
+
 def sample_single_tri(input_):
     n1, n2, v1, v2, tri_vert = input_
     c = np.mgrid[:n1+1, :n2+1]
@@ -23,10 +35,69 @@ def write_vis_pcd(file, points, colors):
     pcd.colors = o3d.utility.Vector3dVector(colors)
     o3d.io.write_point_cloud(file, pcd)
 
+
+def create_disk_kernel(radius, device="cuda"):
+    y, x = torch.meshgrid(torch.arange(-radius, radius + 1, device=device),
+                          torch.arange(-radius, radius + 1, device=device),
+                          indexing="ij")
+    dist = torch.sqrt(x**2 + y**2)
+    kernel = (dist <= radius).float()
+    return kernel
+
+def binary_dilation(mask, radius, iterations=1):
+    """
+    Perform binary dilation with a disk-shaped kernel.
+    
+    Args:
+        mask (torch.Tensor): Binary mask of shape [H, W] or [B, 1, H, W].
+        radius (int): Radius of the disk kernel.
+        iterations (int): Number of dilation iterations.
+        
+    Returns:
+        torch.Tensor: Dilated binary mask with the same shape as input.
+    """
+    # Create the disk kernel
+    kernel = create_disk_kernel(radius, device=mask.device).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+
+    # Ensure mask is 4D: [B, 1, H, W]
+    if mask.dim() == 2:
+        mask = mask.unsqueeze(0).unsqueeze(0)
+    elif mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+
+    # Perform dilation
+    for _ in range(iterations):
+        mask = F.conv2d(mask.float(), kernel, padding=radius)
+        mask = (mask > 0).float()  # Binarize the result
+
+    return mask.squeeze(0).squeeze(0)
+
+def knn_approximation(points1, points2, k=1, batch_size=1024):
+    N1 = points1.shape[0]
+    distances = []
+
+    for i in range(0, N1, batch_size): # chunk the input to avoid OOM
+        chunk = points1[i:i + batch_size]  # [batch_size, 3]
+        dists = torch.cdist(chunk, points2)  # [batch_size, N2]
+        min_dist, _ = torch.topk(dists, k=k, largest=False)
+        distances.append(min_dist)
+    
+    return torch.cat(distances, dim=0)
+
+def chamfer_distance(points1: torch.Tensor, points2: torch.Tensor) -> float:
+    diff_1 = knn_approximation(points1, points2)  # [N1, N2]
+
+    min_dist_1, _ = torch.min(diff_1, dim=1)
+    min_dist_2, _ = torch.min(diff_1, dim=0)
+
+    cd = torch.mean(min_dist_1) + torch.mean(min_dist_2)
+    return cd.item()
+
 if __name__ == '__main__':
     mp.freeze_support()
 
     parser = argparse.ArgumentParser()
+    lp = ModelParams(parser)
     parser.add_argument('--data', type=str, default='data_in.ply')
     parser.add_argument('--scan', type=int, default=1)
     parser.add_argument('--mode', type=str, default='mesh', choices=['mesh', 'pcd'])
@@ -38,18 +109,85 @@ if __name__ == '__main__':
     parser.add_argument('--visualize_threshold', type=float, default=10)
     args = parser.parse_args()
 
+    dataset_file = '/home/yuanyouwen/expdata/neuralto/chinesedragon'
+    output_file = 'output_neuralto/chinesedragon/test'
+    gt_mesh_file = '/home/yuanyouwen/expdata/neuralto/gt_mesh/dragon.obj'
+
+    reconstructed_mesh_file = 'tsdf_fusion_post.ply'
+
+    if not os.path.exists(gt_mesh_file):
+        print('not exists gt mesh file')
+    
+    # load masks
+    train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
+    test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
+    train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
+    test_cameras = cameraList_from_camInfos(test_cam_infos, 1.0, lp.extract(args))
+    all_cameras = train_cameras + test_cameras
+
+    mask_cull = True
+    
+    
     thresh = args.downsample_density
     if args.mode == 'mesh':
-        pbar = tqdm(total=9)
-        pbar.set_description('read data mesh')
-        data_mesh = o3d.io.read_triangle_mesh(args.data)
-        data_mesh.remove_unreferenced_vertices()
-        data_mesh.remove_degenerate_triangles()
+        reconstructed_mesh = trimesh.load_mesh(os.path.join(output_file, 'mesh', reconstructed_mesh_file))
+
+        if mask_cull:
+            # project and filter
+            vertices = torch.from_numpy(reconstructed_mesh.vertices).cuda()
+            vertices = torch.cat((vertices, torch.ones_like(vertices[:, :1])), dim=-1).float()
+
+            sampled_masks = []
+            
+            visibility = np.ones(vertices.shape[0], dtype=bool)
+            for i, camera in tqdm(enumerate(all_cameras),  desc="Culling mesh given masks"):      
+                with torch.no_grad():
+                    # transform and project
+                    cam_points =  vertices @ camera.full_proj_transform
+                    ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
+                    point2d_x = (ndc_points[:, 0] + 1) * 0.5 * camera.image_width
+                    point2d_y = (ndc_points[:, 1] + 1) * 0.5 * camera.image_height
+                    point2d = torch.stack([point2d_x, point2d_y], dim=-1)
+
+                    in_image = (point2d[:, 0] >= 0) & (point2d[:, 0] < camera.image_width) & (point2d[:, 1] >= 0) & (point2d[:, 1] < camera.image_height)
+                    point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
+                    point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
+                    
+                    mask = binary_dilation((camera.mask).float(), 8).bool()
+                    valid = in_image & mask[point2d[:, 1].long(), point2d[:, 0].long()]
+                    visibility &= valid.cpu().numpy()
+
+                    # point_valid = point2d[valid]
+                    # image = torch.zeros([camera.image_height, camera.image_width], dtype=torch.uint8)
+                    # image[point_valid[:, 1].long(), point_valid[:, 0].long()] = 255
+                    # cv2.imwrite(f"debug/{camera.image_name}.png", image.cpu().numpy())
+
+            new_vertices = reconstructed_mesh.vertices[visibility]
+            old_to_new_map = -np.ones(reconstructed_mesh.vertices.shape[0], dtype=np.int64)
+            old_to_new_map[visibility] = np.arange(np.sum(visibility))
+            new_faces_mask = visibility[reconstructed_mesh.faces].all(axis=1)
+            new_faces = old_to_new_map[reconstructed_mesh.faces[new_faces_mask]]
+
+            assert np.all(new_faces >= 0)
+            assert np.all(new_faces < len(new_vertices))
+
+
+            reconstructed_mesh = o3d.geometry.TriangleMesh()
+            reconstructed_mesh.vertices = o3d.utility.Vector3dVector(new_vertices)
+            reconstructed_mesh.triangles = o3d.utility.Vector3iVector(new_faces)
+            o3d.io.write_triangle_mesh(os.path.join(output_file, 'mesh', 'filtered_' + reconstructed_mesh_file.replace('.ply', '.obj')), reconstructed_mesh)
+            
         
         # align points cloud
         p_pcd = o3d.geometry.PointCloud()
-        p_pcd.points = o3d.utility.Vector3dVector(np.asarray(data_mesh.vertices))
-        gt_pcd = o3d.io.read_point_cloud(f'{args.dataset_dir}/Points/stl/stl{args.scan:03}_total.ply')
+        p_pcd.points = o3d.utility.Vector3dVector(new_vertices)
+        
+        if Path(gt_mesh_file).suffix == '.ply':
+            gt_pcd = o3d.io.read_point_cloud(gt_mesh_file)
+        elif Path(gt_mesh_file).suffix == '.obj':
+            gt_mesh = o3d.io.read_triangle_mesh(gt_mesh_file)
+            gt_pcd = gt_mesh.sample_points_uniformly(number_of_points=100_000)
+        
         reg = o3d.pipelines.registration.registration_icp(
             p_pcd,
             gt_pcd,
@@ -74,128 +212,11 @@ if __name__ == '__main__':
             o3d.pipelines.registration.TransformationEstimationPointToPoint(True),
             o3d.pipelines.registration.ICPConvergenceCriteria(1e-6, 50),
         )
-        data_mesh.transform(reg3.transformation)
-        # o3d.io.write_triangle_mesh("output_mesh.ply", data_mesh)
+        reconstructed_mesh.transform(reg3.transformation)
+
+        reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=100_000)
+        reconstructed_pcd = torch.from_numpy(np.asarray(reconstructed_pcd.points)).cuda()
+        gt_pcd = torch.from_numpy(np.asarray(gt_pcd.points)).cuda()
+        cd = chamfer_distance(reconstructed_pcd, gt_pcd)
+        print(f"Chamfer distance: {cd}")
         
-        vertices = np.asarray(data_mesh.vertices)
-        triangles = np.asarray(data_mesh.triangles)
-        tri_vert = vertices[triangles]
-
-        pbar.update(1)
-        pbar.set_description('sample pcd from mesh')
-        v1 = tri_vert[:,1] - tri_vert[:,0]
-        v2 = tri_vert[:,2] - tri_vert[:,0]
-        l1 = np.linalg.norm(v1, axis=-1, keepdims=True)
-        l2 = np.linalg.norm(v2, axis=-1, keepdims=True)
-        area2 = np.linalg.norm(np.cross(v1, v2), axis=-1, keepdims=True)
-        non_zero_area = (area2 > 0)[:,0]
-        l1, l2, area2, v1, v2, tri_vert = [
-            arr[non_zero_area] for arr in [l1, l2, area2, v1, v2, tri_vert]
-        ]
-        thr = thresh * np.sqrt(l1 * l2 / area2)
-        n1 = np.floor(l1 / thr)
-        n2 = np.floor(l2 / thr)
-
-        with mp.Pool() as mp_pool:
-            new_pts = mp_pool.map(sample_single_tri, ((n1[i,0], n2[i,0], v1[i:i+1], v2[i:i+1], tri_vert[i:i+1,0]) for i in range(len(n1))), chunksize=1024)
-
-        new_pts = np.concatenate(new_pts, axis=0)
-        data_pcd = np.concatenate([vertices, new_pts], axis=0)
-        
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(data_mesh.vertices)
-        o3d.io.write_point_cloud("output_point_cloud.pcd", point_cloud)
-    elif args.mode == 'pcd':
-        pbar = tqdm(total=8)
-        pbar.set_description('read data pcd')
-        data_pcd_o3d = o3d.io.read_point_cloud(args.data)
-        data_pcd = np.asarray(data_pcd_o3d.points)
-
-    pbar.update(1)
-    pbar.set_description('random shuffle pcd index')
-    shuffle_rng = np.random.default_rng()
-    shuffle_rng.shuffle(data_pcd, axis=0)
-
-    pbar.update(1)
-    pbar.set_description('downsample pcd')
-    nn_engine = skln.NearestNeighbors(n_neighbors=1, radius=thresh, algorithm='kd_tree', n_jobs=-1)
-    nn_engine.fit(data_pcd)
-    rnn_idxs = nn_engine.radius_neighbors(data_pcd, radius=thresh, return_distance=False)
-    mask = np.ones(data_pcd.shape[0], dtype=np.bool_)
-    for curr, idxs in enumerate(rnn_idxs):
-        if mask[curr]:
-            mask[idxs] = 0
-            mask[curr] = 1
-    data_down = data_pcd[mask]
-
-    pbar.update(1)
-    pbar.set_description('masking data pcd')
-    obs_mask_file = loadmat(f'{args.dataset_dir}/ObsMask/ObsMask{args.scan}_10.mat')
-    ObsMask, BB, Res = [obs_mask_file[attr] for attr in ['ObsMask', 'BB', 'Res']]
-    BB = BB.astype(np.float32)
-
-    patch = args.patch_size
-    inbound = ((data_down >= BB[:1]-patch) & (data_down < BB[1:]+patch*2)).sum(axis=-1) ==3
-    data_in = data_down[inbound]
-
-    data_grid = np.around((data_in - BB[:1]) / Res).astype(np.int32)
-    grid_inbound = ((data_grid >= 0) & (data_grid < np.expand_dims(ObsMask.shape, 0))).sum(axis=-1) ==3
-    data_grid_in = data_grid[grid_inbound]
-    in_obs = ObsMask[data_grid_in[:,0], data_grid_in[:,1], data_grid_in[:,2]].astype(np.bool_)
-    data_in_obs = data_in[grid_inbound][in_obs]
-
-    pbar.update(1)
-    pbar.set_description('read STL pcd')
-    stl_pcd = o3d.io.read_point_cloud(f'{args.dataset_dir}/Points/stl/stl{args.scan:03}_total.ply')
-    stl = np.asarray(stl_pcd.points)
-
-    pbar.update(1)
-    pbar.set_description('compute data2stl')
-    nn_engine.fit(stl)
-    dist_d2s, idx_d2s = nn_engine.kneighbors(data_in_obs, n_neighbors=1, return_distance=True)
-    max_dist = args.max_dist
-    mean_d2s = dist_d2s[dist_d2s < max_dist].mean()
-
-    pbar.update(1)
-    pbar.set_description('compute stl2data')
-    ground_plane = loadmat(f'{args.dataset_dir}/ObsMask/Plane{args.scan}.mat')['P']
-
-    stl_hom = np.concatenate([stl, np.ones_like(stl[:,:1])], -1)
-    above = (ground_plane.reshape((1,4)) * stl_hom).sum(-1) > 0
-    stl_above = stl[above]
-
-    nn_engine.fit(data_in)
-    dist_s2d, idx_s2d = nn_engine.kneighbors(stl_above, n_neighbors=1, return_distance=True)
-    mean_s2d = dist_s2d[dist_s2d < max_dist].mean()
-
-    pbar.update(1)
-    pbar.set_description('visualize error')
-    vis_dist = args.visualize_threshold
-    R = np.array([[1,0,0]], dtype=np.float64)
-    G = np.array([[0,1,0]], dtype=np.float64)
-    B = np.array([[0,0,1]], dtype=np.float64)
-    W = np.array([[1,1,1]], dtype=np.float64)
-    data_color = np.tile(B, (data_down.shape[0], 1))
-    data_alpha = dist_d2s.clip(max=vis_dist) / vis_dist
-    data_color[ np.where(inbound)[0][grid_inbound][in_obs] ] = R * data_alpha + W * (1-data_alpha)
-    data_color[ np.where(inbound)[0][grid_inbound][in_obs][dist_d2s[:,0] >= max_dist] ] = G
-    write_vis_pcd(f'{args.vis_out_dir}/vis_{args.scan:03}_d2s.ply', data_down, data_color)
-    stl_color = np.tile(B, (stl.shape[0], 1))
-    stl_alpha = dist_s2d.clip(max=vis_dist) / vis_dist
-    stl_color[ np.where(above)[0] ] = R * stl_alpha + W * (1-stl_alpha)
-    stl_color[ np.where(above)[0][dist_s2d[:,0] >= max_dist] ] = G
-    write_vis_pcd(f'{args.vis_out_dir}/vis_{args.scan:03}_s2d.ply', stl, stl_color)
-
-    pbar.update(1)
-    pbar.set_description('done')
-    pbar.close()
-    over_all = (mean_d2s + mean_s2d) / 2
-    print(mean_d2s, mean_s2d, over_all)
-
-    out_file = os.path.join(args.vis_out_dir, 'result.csv')
-    with open(out_file, 'w', newline='') as f:
-        writer = csv.writer(f)
-        name = ['mean_d2s','mean_s2d','over_all']
-        data = [mean_d2s, mean_s2d, over_all]
-        writer.writerow(name)
-        writer.writerow(data)

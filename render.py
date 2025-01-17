@@ -21,6 +21,7 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+from scene.direct_light_map import DirectLightMap
 import numpy as np
 import cv2
 import open3d as o3d
@@ -40,7 +41,7 @@ def clean_mesh(mesh, min_len=1000):
     return mesh_0
 
 def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, background, 
-               app_model=None, max_depth=5.0, volume=None, use_depth_filter=False):
+               app_model=None, max_depth=5.0, volume=None, use_depth_filter=False, env_light_map=None):
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     render_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_depth")
@@ -51,15 +52,20 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
     makedirs(render_depth_path, exist_ok=True)
     makedirs(render_normal_path, exist_ok=True)
 
+    pbr_kwargs = dict()
+    pbr_kwargs["env_light"] = env_light_map
+    gaussians.update_visibility(64)
+
     depths_tsdf_fusion = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         gt, _ = view.get_image()
-        out = render(view, gaussians, pipeline, background, app_model=app_model)
-        rendering = out["render"].clamp(0.0, 1.0)
+        out = render(view, gaussians, pipeline, background, app_model=app_model, return_pbr=True, dict_params=pbr_kwargs)
+        rendering = out["render1"].clamp(0.0, 1.0)
         _, H, W = rendering.shape
 
         depth = out["plane_depth"].squeeze()
-        depth_tsdf = depth.clone()
+        alpha = out["alpha"].squeeze()
+        depth_tsdf = depth.clone() * alpha
         depth = depth.detach().cpu().numpy()
         depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
         depth_i = (depth_i * 255).clip(0, 255).astype(np.uint8)
@@ -79,7 +85,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         cv2.imwrite(os.path.join(render_depth_path, view.image_name + ".jpg"), depth_color)
         cv2.imwrite(os.path.join(render_normal_path, view.image_name + ".jpg"), normal)
 
-        if use_depth_filter:
+        if False and use_depth_filter:
             view_dir = torch.nn.functional.normalize(view.get_rays(), p=2, dim=-1)
             depth_normal = out["depth_normal"].permute(1,2,0)
             depth_normal = torch.nn.functional.normalize(depth_normal, p=2, dim=-1)
@@ -108,7 +114,6 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
                 pts_in_nearest_cam = torch.matmul(nearest_world_view_transforms[:,None,:3,:3].expand(num_n,H*W,3,3).transpose(-1,-2), 
                                                   pts[None,:,:,None].expand(num_n,H*W,3,1))[...,0] + nearest_world_view_transforms[:,None,3,:3] # b, pts, 3
 
-                depths_nearest = depths_tsdf_fusion[view.nearest_id][:,None]
                 pts_projections = torch.stack(
                                 [pts_in_nearest_cam[...,0] * view.Fx / pts_in_nearest_cam[...,2] + view.Cx,
                                 pts_in_nearest_cam[...,1] * view.Fy / pts_in_nearest_cam[...,2] + view.Cy], -1).float()
@@ -118,7 +123,10 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
                 pts_projections[..., 0] /= ((view.image_width - 1) / 2)
                 pts_projections[..., 1] /= ((view.image_height - 1) / 2)
                 pts_projections -= 1
+
                 pts_projections = pts_projections.view(num_n, -1, 1, 2)
+    
+                depths_nearest = depths_tsdf_fusion[view.nearest_id][:,None]
                 map_z = torch.nn.functional.grid_sample(input=depths_nearest,
                                                         grid=pts_projections,
                                                         mode='bilinear',
@@ -162,6 +170,8 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        direct_env_light = DirectLightMap()
+
         # app_model = AppModel()
         # app_model.load_weights(scene.model_path)
         # app_model.eval()
@@ -177,7 +187,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
 
         if not skip_train:
             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), scene, gaussians, pipeline, background, 
-                       max_depth=max_depth, volume=volume, use_depth_filter=use_depth_filter)
+                       max_depth=max_depth, volume=volume, use_depth_filter=use_depth_filter, env_light_map=direct_env_light)
             print(f"extract_triangle_mesh")
             mesh = volume.extract_triangle_mesh()
 
@@ -193,7 +203,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
                                        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
 
         if not skip_test:
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background)
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background, env_light_map=direct_env_light)
 
 if __name__ == "__main__":
     torch.set_num_threads(8)
@@ -212,6 +222,9 @@ if __name__ == "__main__":
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
+    args.skip_test = False
+    args.eval = True
+    args.use_depth_filter = True
     # Initialize system state (RNG)
     safe_state(args.quiet)
     print(f"multi_view_num {model.multi_view_num}")

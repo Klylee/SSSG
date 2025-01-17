@@ -108,6 +108,11 @@ def build_scaling(s):
     return L
 
 def build_scaling_rotation(s, r):
+    '''
+    build rotation matrix 3*3 via scales and quaternions
+    
+    return tensor [N, 3, 3] 
+    '''
     L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
     R = build_rotation(r)
 

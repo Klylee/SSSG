@@ -13,6 +13,8 @@ import torch
 import math
 import numpy as np
 from typing import NamedTuple
+from .sh_utils import rotation_between_z
+import torch.nn.functional as F
 
 def ndc_2_cam(ndc_xyz, intrinsic, W, H):
     inv_scale = torch.tensor([[W - 1, H - 1]], device=ndc_xyz.device)
@@ -194,3 +196,52 @@ def patch_warp(H, uv):
     grid_tmp = grid_tmp.reshape(B, P, 3)
     grid = grid_tmp[..., :2] / (grid_tmp[..., 2:] + 1e-10)
     return grid
+
+def rgb_to_srgb(img, clip=True):
+    # hdr img
+    if isinstance(img, np.ndarray):
+        assert len(img.shape) == 3, img.shape
+        assert img.shape[2] == 3, img.shape
+        img = np.where(img > 0.0031308, np.power(np.maximum(img, 0.0031308), 1.0 / 2.4) * 1.055 - 0.055, 12.92 * img)
+        if clip:
+            img = np.clip(img, 0.0, 1.0)
+        return img
+    elif isinstance(img, torch.Tensor):
+        assert len(img.shape) == 3, img.shape
+        assert img.shape[0] == 3, img.shape
+        img = torch.where(img > 0.0031308, torch.pow(torch.max(img, torch.tensor(0.0031308)), 1.0 / 2.4) * 1.055 - 0.055, 12.92 * img)
+        if clip:
+            img = torch.clamp(img, 0.0, 1.0)
+        return img
+    else:
+        raise TypeError("Unsupported input type. Supported types are numpy.ndarray and torch.Tensor.")
+
+def fibonacci_sphere_sampling(normals, sample_num, random_rotate=True):
+    pre_shape = normals.shape[:-1]
+    if len(pre_shape) > 1:
+        normals = normals.reshape(-1, 3)
+    delta = np.pi * (3.0 - np.sqrt(5.0))
+
+    # fibonacci sphere sample around z axis
+    idx = torch.arange(sample_num, dtype=torch.float, device='cuda')[None]
+    z = (1 - 2 * idx / (2 * sample_num - 1)).clamp_min(np.sin(10/180*np.pi))
+    rad = torch.sqrt(1 - z ** 2)
+    theta = delta * idx
+    if random_rotate:
+        theta = torch.rand(*pre_shape, 1, device='cuda') * 2 * np.pi + theta
+    y = torch.cos(theta) * rad
+    x = torch.sin(theta) * rad
+    z_samples = torch.stack([x, y, z.expand_as(y)], dim=-2)
+
+    # rotate to normal
+    # z_vector = torch.zeros_like(normals)
+    # z_vector[..., 2] = 1  # [H, W, 3]
+    # rotation_matrix = rotation_between_vectors(z_vector, normals)
+    rotation_matrix = rotation_between_z(normals)
+    incident_dirs = rotation_matrix @ z_samples
+    incident_dirs = F.normalize(incident_dirs, dim=-2).transpose(-1, -2)
+    incident_areas = torch.ones_like(incident_dirs)[..., 0:1] * 2 * np.pi
+    if len(pre_shape) > 1:
+        incident_dirs = incident_dirs.reshape(*pre_shape, sample_num, 3)
+        incident_areas = incident_areas.reshape(*pre_shape, sample_num, 1)
+    return incident_dirs, incident_areas

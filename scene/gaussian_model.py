@@ -231,9 +231,16 @@ class GaussianModel:
     @property
     def get_brdf(self):
         return torch.cat([self.get_base_color, self.get_roughness], dim=-1)
-    @property
-    def get_normal_p(self):
-        return self.normal_activation(self._normal)
+    
+    def get_normal_p(self, view_cam=None):
+        normal_global = self.normal_activation(self._normal)
+        if view_cam == None:
+            return normal_global
+        gaussian_to_cam_global = view_cam.camera_center - self._xyz
+        neg_mask = (normal_global * gaussian_to_cam_global).sum(-1) < 0.0
+        normal_global[neg_mask] = -normal_global[neg_mask]
+        return normal_global
+    
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
@@ -300,7 +307,7 @@ class GaussianModel:
         gaussians_xyz = self.get_xyz
         gaussians_inverse_covariance = self.get_inverse_covariance()
         gaussians_opacity = self.get_opacity[:, 0]
-        gaussians_normal = self.get_normal_p
+        gaussians_normal = self.get_normal_p()
         incident_visibility_results = []
         incident_dirs_results = []
         incident_areas_results = []

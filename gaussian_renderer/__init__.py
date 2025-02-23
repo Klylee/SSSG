@@ -36,7 +36,7 @@ def render_normal(viewpoint_cam, depth, offset=None, normal=None, scale=1):
     return normal_ref
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, 
-           app_model: AppModel=None, return_plane = True, return_depth_normal = True, return_pbr = False, dict_params = None, inner_gs = None):
+           app_model: AppModel=None, return_plane = True, return_depth_normal = True, return_pbr = False, direct_light = None, inner_gs = None):
     """
     Render the scene. 
     
@@ -161,20 +161,19 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         roughness = pc.get_roughness
         viewdirs = F.normalize(viewpoint_camera.camera_center - means3D, dim=-1)
         incidents = pc.get_incidents
-        direct_light_env_light = dict_params.get("env_light")
 
-        
+        global_normal_p = pc.get_normal_p(viewpoint_camera)
 
         if pc._incident_dirs.shape[0] == incidents.shape[0]:
             brdf_color, extra_results = rendering_equation(
                 base_color, roughness, global_normal, viewdirs, incidents, pc.get_scattersColor,
-                direct_light_env_light, visibility_precompute=pc._visibility_tracing, incident_dirs_precompute=pc._incident_dirs, incident_areas_precompute=pc._incident_areas, world_to_view=viewpoint_camera.world_view_transform[:3,:3])
+                direct_light, visibility_precompute=pc._visibility_tracing, incident_dirs_precompute=pc._incident_dirs, incident_areas_precompute=pc._incident_areas, world_to_view=viewpoint_camera.world_view_transform[:3,:3])
         
             input_all_map[:, 5:8] = brdf_color
             input_all_map[:, 8:11] = base_color
             input_all_map[:, 11] = roughness.squeeze()
             input_all_map[:, 12:15] = extra_results["diffuse_light"]
-            input_all_map[:, 15:18] = F.normalize(pc.get_normal_p @ viewpoint_camera.world_view_transform[:3,:3]) # property normal
+            input_all_map[:, 15:18] = F.normalize(global_normal_p @ viewpoint_camera.world_view_transform[:3,:3]) # property normal
 
             input_all_map[:, 18:21] = extra_results["specular"]
             # input_all_map[:, 21] = extra_results["opacity_in"]
@@ -183,8 +182,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
             if inner_gs is not None:
                 inner_means3D = inner_gs.get_xyz
-                inner_means2D = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
-                inner_means2D_abs = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+                inner_means2D = torch.zeros_like(inner_gs.get_xyz, dtype=inner_gs.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+                inner_means2D_abs = torch.zeros_like(inner_gs.get_xyz, dtype=inner_gs.get_xyz.dtype, requires_grad=True, device="cuda") + 0
                 try:
                     inner_means2D.retain_grad()
                     inner_means2D_abs.retain_grad()
@@ -193,10 +192,12 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 inner_opacity = inner_gs.get_opacity
                 inner_scales = inner_gs.get_scaling
                 inner_rotations = inner_gs.get_rotation
+                inner_shs = inner_gs.get_features
 
                 means3D_all = torch.cat([means3D, inner_means3D], dim=0)
                 means2D_all = torch.cat([means2D, inner_means2D], dim=0)
                 means2D_abs_all = torch.cat([means2D_abs, inner_means2D_abs], dim=0)
+                shs_all = torch.cat([shs, inner_shs], dim=0)
                 opacity_all = torch.cat([opacity * F0, inner_opacity], dim=0)
                 scales_all = torch.cat([scales, inner_scales], dim=0)
                 rotations_all = torch.cat([rotations, inner_rotations], dim=0)
@@ -204,7 +205,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 # cat input_all_map
                 inner_input_all_map = torch.zeros((inner_means3D.shape[0], 30)).cuda().float()
 
-                inner_colors = eval_sh(pc.active_sh_degree, inner_gs.get_features.transpose(1,2).view(-1, 3, (inner_gs.max_sh_degree + 1)**2), viewdirs)
+                inner_viewdirs = F.normalize(viewpoint_camera.camera_center - inner_means3D, dim=-1)
+                inner_colors = eval_sh(inner_gs.active_sh_degree, inner_gs.get_features.transpose(1,2).view(-1, 3, (inner_gs.max_sh_degree + 1)**2), inner_viewdirs)
                 inner_input_all_map[:, 5:8] = torch.clamp_min(inner_colors + 0.5, 0.0)
 
                 input_all_map_all = torch.cat([input_all_map, inner_input_all_map], dim=0)
@@ -212,6 +214,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 means3D_all = means3D
                 means2D_all = means2D
                 means2D_abs_all = means2D_abs
+                shs_all = shs
                 opacity_all = opacity * F0
                 scales_all = scales
                 rotations_all = rotations
@@ -221,7 +224,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             means3D = means3D_all,
             means2D = means2D_all,
             means2D_abs = means2D_abs_all,
-            shs = shs,
+            shs = shs_all,
             colors_precomp = colors_precomp,
             opacities = opacity_all,
             scales = scales_all,
@@ -253,15 +256,35 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rendered_alpha = out_all_map[3:4, ]
     rendered_distance = out_all_map[4:5, ]
 
-    if pc.use_pbr:
+    if pc.use_pbr and return_pbr:
         # rendered_pbr = out_all_map[5:8, ]
         rendered_base_color = out_all_map[8:11, ]
-        rendered_roughness = out_all_map[11, ]
-        rendered_diffuse = out_all_map[12:15, ]
-        rendered_normal_p = out_all_map[15:18, ]
-        rendered_specular = out_all_map[18:21, ]
+        rendered_roughness  = out_all_map[11, ]
+        rendered_diffuse    = out_all_map[12:15, ]
+        rendered_normal_p   = out_all_map[15:18, ]
+        rendered_specular   = out_all_map[18:21, ]
         rendered_opacity_in = out_all_map[21, ]
-    
+
+        # add 2025-2-19 <start>
+        # 在屏幕空间计算specular
+        normal_dot_view = torch.sum(rendered_normal.permute(1,2,0) * viewpoint_camera.get_rays(), dim=-1) # [H, W]
+        # normal_dot_view = normal_dot_view.clamp(min=0, max=1)
+        # tan_theta = torch.sqrt(1.0 - normal_dot_view * normal_dot_view) / (normal_dot_view + 1e-10)
+        # root = rendered_roughness * tan_theta  
+        # G = 2.0 / (1.0 + torch.hypot(root, torch.ones_like(root))) 
+        # dot_2 = normal_dot_view * normal_dot_view
+        # root_2 = dot_2 + (1.0 - dot_2) / (rendered_roughness * rendered_roughness + 1e-10)
+        # D = 1.0 / (math.pi * rendered_roughness * rendered_roughness * root_2 * root_2 + 1e-10)
+        # light_color = direct_light.colocated_light.unsqueeze(0).unsqueeze(0).repeat(normal_dot_view.shape[0], normal_dot_view.shape[1], 3)
+        # specular_color = 0.5 * light_color * 0.04 * G.unsqueeze(-1) * D.unsqueeze(-1) / (4.0 * normal_dot_view.unsqueeze(-1) + 1e-10) # [H, W, 3]
+        # specular_color = specular_color.permute(2, 0, 1)
+
+        # try blinn-phong model 2025-2-19
+        specular_intensity = 0.5 * torch.pow(normal_dot_view, 32)
+        light_color = direct_light.colocated_light.unsqueeze(0).unsqueeze(0).repeat(normal_dot_view.shape[0], normal_dot_view.shape[1], 3)
+        specular_color = light_color * specular_intensity.unsqueeze(-1)
+        specular_color = specular_color.permute(2, 0, 1)
+        # <end>
 
     return_dict =  {"render": rendered_image,
                     "viewspace_points": screenspace_points,
@@ -282,12 +305,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                             "rendered_normal_p": rendered_normal_p,
                             "roughness": rendered_roughness,
                             "diffuse": rgb_to_srgb(rendered_diffuse),
-                            "specular": rendered_specular,
+                            "specular": specular_color,
                         })
         if inner_gs is not None:
-            return_dict.update({"inner_radii": inner_radii,
-                                "inner_observe": inner_observe
-                            })
+            return_dict.update({
+                "inner_viewspace_points": inner_means2D,
+                "inner_viewspace_points_abs": inner_means2D_abs,
+                "inner_radii": inner_radii,
+                "inner_vis_filter": inner_radii > 0,
+                "inner_observe": inner_observe
+            })
     
     if app_model is not None and pc.use_app:
         appear_ab = app_model.appear_ab[torch.tensor(viewpoint_camera.uid).cuda()]
@@ -411,14 +438,14 @@ def calculate_loss(viewpoint_camera, pc, results, opt, direct_light_env_light):
     return loss, tb_dict
 
 def rendering_equation(base_color, roughness, normals, viewdirs,
-                              incidents, scatters, direct_light_env_light=None,
+                              incidents, scatters, direct_light=None,
                               visibility_precompute=None, incident_dirs_precompute=None, incident_areas_precompute=None, world_to_view=None):
     incident_dirs, incident_areas = incident_dirs_precompute, incident_areas_precompute
 
     deg = int(math.sqrt(incidents.shape[1]) - 1)
     local_incident_lights = eval_sh(deg, incidents.transpose(1, 2).view(-1, 1, 3, (deg + 1) ** 2), incident_dirs).clamp_min(0)
 
-    global_incident_lights = direct_light_env_light.direct_light(torch.matmul(incident_dirs, world_to_view))
+    global_incident_lights = direct_light.direct_light(torch.matmul(incident_dirs, world_to_view))
 
     viewdirDotIncidentdir = incident_dirs @ viewdirs.unsqueeze(2)
     # parallel_lights = direct_light_env_light.light_strength * viewdirDotIncidentdir
@@ -430,6 +457,8 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
     # viewdirs: [N, 3]
     # incident_dirs: [N, Samples, 3]
     
+    normal_dot_view = (normals * viewdirs).sum(-1).unsqueeze(1) # [N,1]
+    normal_dot_view = normal_dot_view.clamp(min=0, max=1)
 
     n_d_i = (normals[:, None] * incident_dirs).sum(-1, keepdim=True).clamp(min=0)
     f_d = base_color[:, None] / math.pi
@@ -440,16 +469,43 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
     scatter_colors = scatter_colors * (-viewdirDotIncidentdir).clamp(min=0) # [N, Samples, 3]
     scatter_color = scatter_colors.mean(dim=-2)
     
+    F0 = 0.04 + 0.96 * (1 - normal_dot_view)
+
     # singleScatterColor = (base_color.unsqueeze(1).repeat(1, incident_dirs.shape[1], 1) * scatterColors) * (-viewdirDotIncidentdir.clamp(min=0)) # [N, Samples, 3]
     # singleScatterColor = base_color * opacity_in.unsqueeze(1) # [N,]
 
-    normalDotViewdir = (normals * viewdirs).sum(-1).unsqueeze(1) # [N,1]
-    F0 = 0.04 + 0.96 * (1 - normalDotViewdir)
-
     transport = incident_lights * incident_areas * n_d_i  # （num_pts, num_sample, 3)
-    specular = ((f_s) * transport).mean(dim=-2)
+    specular_color = ((f_s) * transport).mean(dim=-2)
     pbr = F0 * (((f_d + f_s) * transport).mean(dim=-2)) + (1 - F0) * scatter_color
+    # pbr = ((f_d + f_s) * transport).mean(dim=-2)
     # diffuse_light = transport.mean(dim=-2)
+
+    # add 2025-2-18 <start>
+    trans_albedo = 0.8
+    F = 0.04
+    Fss90 = roughness
+    Fss = (1 + (Fss90 - 1) * F) * (1 + (Fss90 - 1) * F)
+    dot_abs = torch.abs(normal_dot_view)
+    S = 1.25 * (Fss * (1 / (dot_abs + dot_abs) - 0.5) + 0.5)
+    fr = S / math.pi
+    surf_color = (1 - trans_albedo) * direct_light.colocated_light * base_color * fr * normal_dot_view
+
+    # sin_theta = torch.sqrt(1.0 - normal_dot_view * normal_dot_view)
+    # tan_theta = sin_theta / (normal_dot_view + 1e-10)
+    # root = roughness * tan_theta  
+    # G = 2.0 / (1.0 + torch.hypot(root, torch.ones_like(root))) 
+
+    # dot_2 = normal_dot_view * normal_dot_view
+    # root_2 = dot_2 + (1.0 - dot_2) / (roughness * roughness + 1e-10)
+    # D = 1.0 / (math.pi * roughness * roughness * root_2 * root_2 + 1e-10)
+    # specular_color = 0.5 * direct_light.colocated_light * F * G * D / (4.0 * normal_dot_view + 1e-10)
+
+    # specular_intensity = 0.5 * torch.pow(normal_dot_view, 32)
+    # light_color = direct_light.colocated_light.unsqueeze(0).repeat(normal_dot_view.shape[0], 3)
+    # specular_color = light_color * specular_intensity
+
+    # pbr = surf_color + specular_color
+    # </end>
 
     extra_results = {
         "incident_dirs": incident_dirs,
@@ -458,20 +514,14 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
         # "global_incident_lights": global_incident_lights,
         # "incident_visibility": visibility_precompute,
         "diffuse_light": scatter_color,
-        "specular": specular,
+        "specular": specular_color,
         "F0": F0
     }
 
     return pbr, extra_results
 
 
-def GGX_specular(
-        normal,
-        pts2c,
-        pts2l,
-        roughness,
-        fresnel
-):
+def GGX_specular(normal, pts2c, pts2l, roughness, fresnel):
     L = F.normalize(pts2l, dim=-1)  # [nrays, nlights, 3]
     V = F.normalize(pts2c, dim=-1)  # [nrays, 3]
     H = F.normalize((L + V[:, None, :]) / 2.0, dim=-1)  # [nrays, nlights, 3]

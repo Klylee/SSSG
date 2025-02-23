@@ -14,7 +14,7 @@ class DirectLightMap:
         env = (light_init * torch.rand((1, self.H, self.W, 3))).float().cuda().requires_grad_(True)
         self.env = nn.Parameter(env)
         self.to_opengl = torch.tensor([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=torch.float32, device="cuda")
-        self.light_strength = nn.Parameter(torch.tensor([1.0]).cuda().requires_grad_(True))
+        self.light_strength = nn.Parameter(torch.tensor([5.0], dtype=torch.float32).cuda().requires_grad_(True))
         
     def training_setup(self, training_args: OptimizationParams):
         l = [
@@ -54,22 +54,6 @@ class DirectLightMap:
 
         return first_iter
     
-    # def direct_light(self, dirs):
-    #     shape = dirs.shape
-    #     dirs = dirs.reshape(-1, 3)
-    #     import pdb;pdb.set_trace()
-    #     tu = torch.atan2(dirs[..., 0:1], -dirs[..., 1:2]) / (2 * np.pi) + 0.5
-    #     tv = torch.acos(torch.clamp(dirs[..., 2:3], min=-1, max=1)) / (np.pi/2) - 1
-        
-        
-    #     dirs = (dirs.reshape(-1, 3) @ self.to_opengl.T)
-    #     tu = torch.atan2(dirs[..., 0:1], -dirs[..., 2:3]) / (2 * np.pi) + 0.5
-    #     tv = torch.acos(torch.clamp(dirs[..., 1:2], min=-1, max=1)) / np.pi
-    #     texcoord = torch.cat((tu, tv), dim=-1)
-    #     # import pdb;pdb.set_trace()
-    #     light = dr.texture(self.env, texcoord[None, None, ...], filter_mode='linear')[0, 0]
-    #     return light.reshape(*shape).clamp_min(0)
-    
     def direct_light(self, dirs, transform=None):
         shape = dirs.shape
         dirs = dirs.reshape(-1, 3)
@@ -106,3 +90,7 @@ class DirectLightMap:
     @property
     def get_env(self):
         return F.softplus(self.env)
+    
+    @property
+    def colocated_light(self):
+        return F.softplus(self.light_strength)

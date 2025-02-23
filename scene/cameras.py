@@ -138,6 +138,8 @@ class Camera(nn.Module):
                     [(ix-self.Cx/scale) / self.Fx * scale,
                     (iy-self.Cy/scale) / self.Fy * scale,
                     torch.ones_like(ix)], -1).float().cuda()
+        rays_magnitude = torch.norm(rays_d, dim=-1, keepdim=True)
+        rays_d = rays_d / rays_magnitude
         return rays_d
     
     def get_k(self, scale=1.0):

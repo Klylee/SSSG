@@ -93,7 +93,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.train()
     app_model.cuda()
     
-    # checkpoint = "./output_neuralto/chinesedragon/test/chkpnt30000.pth"
+    checkpoint = "./output_neuralto/chinesedragon/test/chkpnt30000.pth"
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)

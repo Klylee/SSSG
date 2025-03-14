@@ -52,15 +52,13 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
     makedirs(render_depth_path, exist_ok=True)
     makedirs(render_normal_path, exist_ok=True)
 
-    pbr_kwargs = dict()
-    pbr_kwargs["env_light"] = env_light_map
     gaussians.update_visibility(64)
 
     depths_tsdf_fusion = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         gt, _ = view.get_image()
-        out = render(view, gaussians, pipeline, background, app_model=app_model, return_pbr=True, dict_params=pbr_kwargs)
-        rendering = out["render1"].clamp(0.0, 1.0)
+        out = render(view, gaussians, pipeline, background, app_model=app_model, return_pbr=True, direct_light=env_light_map)
+        rendering = out["render"].clamp(0.0, 1.0)
         _, H, W = rendering.shape
 
         depth = out["plane_depth"].squeeze()
@@ -194,12 +192,12 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             path = os.path.join(dataset.model_path, "mesh")
             os.makedirs(path, exist_ok=True)
             
-            o3d.io.write_triangle_mesh(os.path.join(path, "tsdf_fusion.ply"), mesh, 
+            o3d.io.write_triangle_mesh(os.path.join(path, "tsdf_fusion.obj"), mesh, 
                                        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
             mesh = clean_mesh(mesh)
             mesh.remove_unreferenced_vertices()
             mesh.remove_degenerate_triangles()
-            o3d.io.write_triangle_mesh(os.path.join(path, "tsdf_fusion_post.ply"), mesh, 
+            o3d.io.write_triangle_mesh(os.path.join(path, "tsdf_fusion_post.obj"), mesh, 
                                        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
 
         if not skip_test:

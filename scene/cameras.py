@@ -77,7 +77,15 @@ class Camera(nn.Module):
             gt_image, gray_image, loaded_mask = process_image(self.image_path, self.resolution, ncc_scale)
             self.original_image = gt_image.to(self.data_device)
             self.original_image_gray = gray_image.to(self.data_device)
-            self.mask = loaded_mask
+            
+            path_split = image_path.split('/')
+            mask_path = os.path.join('/'.join(path_split[:-2]), 'mask')
+            mask_path = os.path.join(mask_path, self.image_name + '.png')
+            if os.path.exists(mask_path):
+                self.mask = torch.tensor(cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)).to(self.data_device).squeeze()/255
+                self.mask = erode(self.mask[None,None].float()).squeeze()
+                self.mask = torch.nn.functional.interpolate(self.mask[None,None], size=(image_height,image_width), mode='bilinear', align_corners=False).squeeze()
+                self.mask = (self.mask >= 0.5).to(self.data_device)
 
 
         self.zfar = 100.0

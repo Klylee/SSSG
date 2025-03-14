@@ -5,6 +5,8 @@ from tqdm import tqdm
 from scipy.io import loadmat
 import multiprocessing as mp
 import argparse, os, csv
+import pytorch3d.loss.chamfer
+import matplotlib.cm as cm
 
 print("Current working directory:", os.getcwd())
 import sys
@@ -72,26 +74,21 @@ def binary_dilation(mask, radius, iterations=1):
 
     return mask.squeeze(0).squeeze(0)
 
-def knn_approximation(points1, points2, k=1, batch_size=1024):
-    N1 = points1.shape[0]
-    distances = []
+def chamfer_distance(points1: np.ndarray, points2: np.ndarray) -> float:
+    '''
+    return: dual chamfer distance, points1 to points2, points2 to points1
 
-    for i in range(0, N1, batch_size): # chunk the input to avoid OOM
-        chunk = points1[i:i + batch_size]  # [batch_size, 3]
-        dists = torch.cdist(chunk, points2)  # [batch_size, N2]
-        min_dist, _ = torch.topk(dists, k=k, largest=False)
-        distances.append(min_dist)
-    
-    return torch.cat(distances, dim=0)
+    '''
+    nn_engine = skln.NearestNeighbors(n_neighbors=1, radius=thresh, algorithm='kd_tree', n_jobs=-1)
+    nn_engine.fit(points1)
+    dist_d2s, idx_d2s = nn_engine.kneighbors(points2, n_neighbors=1, return_distance=True) 
+    max_dist = args.max_dist 
+    mean_d2s = dist_d2s[dist_d2s < max_dist].mean()
+    nn_engine.fit(points2)
+    dist_s2d, idx_s2d = nn_engine.kneighbors(points1, n_neighbors=1, return_distance=True) 
+    mean_s2d = dist_s2d[dist_s2d < max_dist].mean()
+    return (mean_d2s + mean_s2d) / 2, mean_s2d, mean_d2s, dist_d2s
 
-def chamfer_distance(points1: torch.Tensor, points2: torch.Tensor) -> float:
-    diff_1 = knn_approximation(points1, points2)  # [N1, N2]
-
-    min_dist_1, _ = torch.min(diff_1, dim=1)
-    min_dist_2, _ = torch.min(diff_1, dim=0)
-
-    cd = torch.mean(min_dist_1) + torch.mean(min_dist_2)
-    return cd.item()
 
 if __name__ == '__main__':
     mp.freeze_support()
@@ -107,32 +104,43 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', type=float, default=60)
     parser.add_argument('--max_dist', type=float, default=20)
     parser.add_argument('--visualize_threshold', type=float, default=10)
+    parser.add_argument('--s', type=str, default='chinesedragon')
+    parser.add_argument('--mc', action='store_true', default=False)
     args = parser.parse_args()
 
-    dataset_file = '/home/yuanyouwen/expdata/neuralto/chinesedragon'
-    output_file = 'output_neuralto/chinesedragon/test'
-    gt_mesh_file = '/home/yuanyouwen/expdata/neuralto/gt_mesh/dragon.obj'
+    dataset_file = f'/home/yuanyouwen/expdata/neuralto/{args.s}'
+    output_file = f'output_neuralto/{args.s}/test'
+    gt_mesh_file = f'/home/yuanyouwen/expdata/neuralto/gt_mesh/{args.s}.obj'
+    # gt_mesh_file = '/home/yuanyouwen/Experiments/PGSR_my/chinesedragon.obj'
 
-    reconstructed_mesh_file = 'tsdf_fusion_post.ply'
+    reconstructed_mesh_file = 'tsdf_fusion_post.obj'
+    # reconstructed_mesh_file = 'tsdf_fusion_post-pgsr2.obj'
+    # reconstructed_mesh_file = 'chinesedragon_without_ncc_loss.ply'
+
+    # reconstructed_mesh_file = 'filtered_mesh_pgsr.obj'
+    # reconstructed_mesh_file = 'filtered_tsdf_fusion_post.obj'
 
     if not os.path.exists(gt_mesh_file):
         print('not exists gt mesh file')
     
-    # load masks
-    train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
-    test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
-    train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
-    test_cameras = cameraList_from_camInfos(test_cam_infos, 1.0, lp.extract(args))
-    all_cameras = train_cameras + test_cameras
+    num_points = 1000_000
 
-    mask_cull = True
+    mask_cull = args.mc
     
+    print('')
     
     thresh = args.downsample_density
     if args.mode == 'mesh':
         reconstructed_mesh = trimesh.load_mesh(os.path.join(output_file, 'mesh', reconstructed_mesh_file))
 
         if mask_cull:
+             # load masks
+            train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
+            test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
+            train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
+            test_cameras = cameraList_from_camInfos(test_cam_infos, 1.0, lp.extract(args))
+            all_cameras = train_cameras + test_cameras
+
             # project and filter
             vertices = torch.from_numpy(reconstructed_mesh.vertices).cuda()
             vertices = torch.cat((vertices, torch.ones_like(vertices[:, :1])), dim=-1).float()
@@ -175,18 +183,29 @@ if __name__ == '__main__':
             reconstructed_mesh = o3d.geometry.TriangleMesh()
             reconstructed_mesh.vertices = o3d.utility.Vector3dVector(new_vertices)
             reconstructed_mesh.triangles = o3d.utility.Vector3iVector(new_faces)
-            o3d.io.write_triangle_mesh(os.path.join(output_file, 'mesh', 'filtered_' + reconstructed_mesh_file.replace('.ply', '.obj')), reconstructed_mesh)
+            o3d.io.write_triangle_mesh(os.path.join(output_file, 'mesh', 'filtered_' + reconstructed_mesh_file), reconstructed_mesh)
             
         
         # align points cloud
         p_pcd = o3d.geometry.PointCloud()
-        p_pcd.points = o3d.utility.Vector3dVector(new_vertices)
+        if mask_cull:
+            p_pcd.points = o3d.utility.Vector3dVector(new_vertices)
+        else:
+            faces = reconstructed_mesh.faces
+            vertices = reconstructed_mesh.vertices
+            reconstructed_mesh = o3d.geometry.TriangleMesh()
+            reconstructed_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+            reconstructed_mesh.triangles = o3d.utility.Vector3iVector(faces)
+            p_pcd.points = o3d.utility.Vector3dVector(vertices)
         
         if Path(gt_mesh_file).suffix == '.ply':
             gt_pcd = o3d.io.read_point_cloud(gt_mesh_file)
         elif Path(gt_mesh_file).suffix == '.obj':
-            gt_mesh = o3d.io.read_triangle_mesh(gt_mesh_file)
-            gt_pcd = gt_mesh.sample_points_uniformly(number_of_points=100_000)
+            tri_mesh = trimesh.load_mesh(gt_mesh_file)
+            gt_mesh = o3d.geometry.TriangleMesh()
+            gt_mesh.vertices = o3d.utility.Vector3dVector(tri_mesh.vertices)
+            gt_mesh.triangles = o3d.utility.Vector3iVector(tri_mesh.faces)
+            gt_pcd = gt_mesh.sample_points_uniformly(number_of_points=num_points)
         
         reg = o3d.pipelines.registration.registration_icp(
             p_pcd,
@@ -214,9 +233,30 @@ if __name__ == '__main__':
         )
         reconstructed_mesh.transform(reg3.transformation)
 
-        reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=100_000)
-        reconstructed_pcd = torch.from_numpy(np.asarray(reconstructed_pcd.points)).cuda()
-        gt_pcd = torch.from_numpy(np.asarray(gt_pcd.points)).cuda()
-        cd = chamfer_distance(reconstructed_pcd, gt_pcd)
-        print(f"Chamfer distance: {cd}")
+
+        reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
+        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'rec.ply'), reconstructed_pcd)
+        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'gt.ply'), gt_pcd)
+
+        cd, cd1, cd2, dist_rg = chamfer_distance(np.asarray(gt_pcd.points), np.asarray(reconstructed_pcd.points))
+        print(f"Chamfer distance: {cd}\n \
+                 {cd1}\n \
+                 {cd2}")
+
+        dist_degree = dist_rg.squeeze() / 0.002
+        dist_degree = dist_degree.astype(int)
+        dist_degree = np.clip(dist_degree, a_min=0, a_max=4)
         
+        palette = np.array([
+            [202, 243, 255],  # '#CAF3FFFF' 0.000 - 0.002
+            [109, 213, 233],  # '#6DD5E9FF' 0.002 - 0.004
+            [58, 154, 199],   # '#3A9AC7FF' 0.004 - 0.006
+            [30, 107, 146],   # '#1E6B92FF' 0.006 - 0.008
+            [20, 76, 102]     # '#144C66'   0.008 -
+        ], dtype=np.float32) / 255.0
+        colors = palette[dist_degree]
+        
+        colored_pcd = o3d.geometry.PointCloud()
+        colored_pcd.points = o3d.utility.Vector3dVector(reconstructed_pcd.points)
+        colored_pcd.colors = o3d.utility.Vector3dVector(colors)
+        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', f"colored-{args.s}.ply"), colored_pcd)

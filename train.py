@@ -103,7 +103,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.train()
     app_model.cuda()
     
-    # checkpoint = "./output_neuralto/chinesedragon/test/chkpnt30000.pth"
+    checkpoint = "./output_neuralto/chinesedragon/test/chkpnt30000.pth"
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -138,7 +138,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.update_visibility(pipe.sample_num)
 
     use_inner_gs = True
-    inner_gs_start = 10000
+    inner_gs_start = 1000
     ratio = 1.0
 
     use_density_prune = True
@@ -213,7 +213,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             inner_opacity = inner_opacity[in_image]
             inner_opacity = inner_opacity[depth_diff > 0 - 0.0001]
             inner_restrain_loss = 0.5 * inner_opacity.mean()
-            # loss += inner_restrain_loss
+            loss += inner_restrain_loss
 
             ratio = inner_opacity.shape[0] / inner_gaussians.get_opacity.shape[0]
         # <end>
@@ -243,10 +243,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image_weight = (image_weight).clamp(0,1).detach() ** 2
 
             # normal_loss = weight * (1 - (F.cosine_similarity(depth_normal, normal, dim=0)).mean())
-            if iteration < 70000:
-                normal_loss = opt.single_view_weight * ((((depth_normal - normal)).abs().sum(0))).mean()
-            else:
-                normal_loss = opt.single_view_weight * ((((depth_normal - normal.detach())).abs().sum(0))).mean()
+            normal_loss = opt.single_view_weight * ((((depth_normal - normal)).abs().sum(0))).mean()
             loss += (normal_loss)
                     
             
@@ -268,7 +265,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 weight = 1.2
                 # if iteration > 65000:
                 #     weight = 1.7
-                if iteration > opt.single_view_weight_from_iter + 12000:
+                if iteration > opt.single_view_weight_from_iter + 2000:
                     loss += weight * loss_pbr
                     loss += 0.01 * loss_base_color_smooth
                     loss += 0.01 * loss_roughness_smooth

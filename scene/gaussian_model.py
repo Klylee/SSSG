@@ -801,12 +801,12 @@ class GaussianModel:
                 "normal": self._normal[selected_pts_mask].repeat(N, 1),
                 "base_color": self._base_color[selected_pts_mask].repeat(N, 1),
                 "roughness": self._roughness[selected_pts_mask].repeat(N, 1),
-                "incidents_dc": self._incidents_dc[selected_pts_mask].repeat(N, 1),
-                "incidents_rest": self._incidents_rest[selected_pts_mask].repeat(N, 1),
-                "scatters_dc": self._scatters_dc[selected_pts_mask].repeat(N, 1),
-                "scatters_rest": self._scatters_rest[selected_pts_mask].repeat(N, 1),
-                "visibility_dc": self._visibility_dc[selected_pts_mask].repeat(N, 1),
-                "visibility_rest": self._visibility_rest[selected_pts_mask].repeat(N, 1)
+                "incidents_dc": self._incidents_dc[selected_pts_mask].repeat(N, 1, 1),
+                "incidents_rest": self._incidents_rest[selected_pts_mask].repeat(N, 1, 1),
+                "scatters_dc": self._scatters_dc[selected_pts_mask].repeat(N, 1, 1),
+                "scatters_rest": self._scatters_rest[selected_pts_mask].repeat(N, 1, 1),
+                "visibility_dc": self._visibility_dc[selected_pts_mask].repeat(N, 1, 1),
+                "visibility_rest": self._visibility_rest[selected_pts_mask].repeat(N, 1, 1)
             })
         self.densification_postfix(new_tensors_dict)
 
@@ -1148,7 +1148,7 @@ class GaussianModel:
         self._opacity[add_idx] = new_opacity
         self._scaling[add_idx] = new_scaling
 
-        self.densification_postfix(new_tensors_dict, reset_params=False)
+        self.densification_postfix(new_tensors_dict, reset_param=False)
         self.replace_tensors_to_optimizer(inds=add_idx)
 
         return num_gs

@@ -223,6 +223,8 @@ if __name__ == "__main__":
     args.skip_test = False
     args.eval = True
     args.use_depth_filter = True
+
+    args.iteration = 50000
     # Initialize system state (RNG)
     safe_state(args.quiet)
     print(f"multi_view_num {model.multi_view_num}")

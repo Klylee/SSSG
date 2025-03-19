@@ -109,7 +109,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 52_000
+        self.densify_until_iter = 55_000
         self.densify_grad_threshold = 0.0002
         
         self.single_view_weight = 0.025
@@ -120,7 +120,7 @@ class OptimizationParams(ParamGroup):
         self.use_multi_view_trim = True
         self.multi_view_ncc_weight = 0.15
         self.multi_view_geo_weight = 0.01
-        self.multi_view_weight_from_iter = 45000
+        self.multi_view_weight_from_iter = 76000
         self.multi_view_patch_size = 3
         self.multi_view_sample_num = 102400
         self.multi_view_pixel_noise_th = 1.0

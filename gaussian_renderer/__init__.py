@@ -162,22 +162,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rendered_normal = out_all_map[0:3]
     rendered_alpha = out_all_map[3:4, ]
     rendered_distance = out_all_map[4:5, ]
-
-    # input_map = torch.zeros((means3D.shape[0], 30)).cuda().float()
-    # input_map[:, 0] = 
-    # _, _, _, out_1, _ = rasterizer(
-    #     means3D = means3D_all,
-    #     means2D = means2D_all,
-    #     means2D_abs = means2D_abs_all,
-    #     shs = shs_all,
-    #     colors_precomp = colors_precomp,
-    #     opacities = opacity_all,
-    #     scales = scales_all,
-    #     rotations = rotations_all,
-    #     all_map = input_all_map_all,
-    #     cov3D_precomp = cov3D_precomp)
-    
-    # squared_error = 
     
     return_dict =  {"render": rendered_image,
                     "viewspace_points": screenspace_points,
@@ -190,6 +174,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                     "rendered_distance": rendered_distance,
                     "alpha": rendered_alpha
                     }
+    depth_normal = render_normal(viewpoint_camera, plane_depth.squeeze()) * (rendered_alpha).detach()
+    if return_depth_normal:
+        return_dict.update({"depth_normal": depth_normal})
     
     if pc.use_pbr and return_pbr and pc._incident_dirs.shape[0] == pc.get_incidents.shape[0]:
         if inner_gs is not None:
@@ -277,8 +264,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             # <start> 2025-2-25 测试延迟渲染
             fresnel = 0.04
             viewdirs = F.normalize(viewpoint_camera.get_rays(), dim=-1) # [H, W, 3]
-            rendered_normal = F.normalize(rendered_normal.permute(1,2,0), dim=-1) # [H, W, 3]
-            nov = torch.sum(rendered_normal * -viewdirs, dim=-1, keepdim=True).clamp(1e-6, 0.999999) # [H, W, 1]
+            normal_map = F.normalize(rendered_normal.permute(1,2,0), dim=-1) # [H, W, 3]
+            nov = torch.sum(normal_map * -viewdirs, dim=-1, keepdim=True).clamp(1e-6, 0.999999) # [H, W, 1]
             frac0 = fresnel + (1 - fresnel) * torch.pow(2.0, ((-5.55473) * nov - 6.98316) * nov)
             alpha = (rendered_roughness * rendered_roughness).unsqueeze(2)
             alpha2 = alpha * alpha
@@ -320,9 +307,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         app_image = torch.exp(appear_ab[0]) * rendered_image + appear_ab[1]
         return_dict.update({"app_image": app_image})   
 
-    if return_depth_normal:
-        depth_normal = render_normal(viewpoint_camera, plane_depth.squeeze()) * (rendered_alpha).detach()
-        return_dict.update({"depth_normal": depth_normal})
+    
     
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
@@ -347,7 +332,7 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
     # incident_lights = local_incident_lights + parallel_lights
     # viewdirs: [N, 3]
     # incident_dirs: [N, Samples, 3]
-    fresnel = 0.04
+    fresnel = 0.1
 
     normal_dot_view = (normals * viewdirs).sum(-1).unsqueeze(1) # [N,1]
     normal_dot_view = normal_dot_view.clamp(min=0, max=1)

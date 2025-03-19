@@ -33,7 +33,7 @@ gaussians.restore(model_params, op.extract(args))
 # gaussians.load_ply('./output_neuralto/yuanbao/test/point_cloud/iteration_80000/point_cloud.ply')
 opacity = gaussians.get_opacity
 
-opacity_filter = (opacity.squeeze()) > 0.5
+opacity_filter = (opacity.squeeze()) > 0.1
 centers = gaussians.get_xyz
 centers = centers[opacity_filter]
 

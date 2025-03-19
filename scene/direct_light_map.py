@@ -37,14 +37,13 @@ class DirectLightMap:
 
         return captured_list
 
-    def restore(self, model_args, training_args,
-                is_training=False, restore_optimizer=True):
+    def restore(self, checkpoint_path, training_arg):
         pass
 
-    def create_from_ckpt(self, checkpoint_path, restore_optimizer=False):
+    def create_from_ckpt(self, checkpoint_path, training_arg, restore_optimizer=False):
         (model_args, first_iter) = torch.load(checkpoint_path)
-        (self.env, self.light_strength,
-         opt_dict) = model_args[:3]
+        (self.env, self.light_strength, opt_dict) = model_args[:3]
+        self.training_setup(training_arg)
 
         if restore_optimizer:
             try:

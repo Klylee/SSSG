@@ -103,7 +103,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.train()
     app_model.cuda()
     
-    checkpoint = "./output_neuralto/chinesedragon/test/chkpnt30000.pth"
+    scene_name = dataset.model_path.split('/')[-2]
+    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt30000.pth"
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -114,7 +115,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             inner_gaussians.restore(model_params, opt)
 
         if gaussians.use_pbr and os.path.exists(checkpoint.replace('chkpnt', 'env_light')):
-            direct_light.create_from_ckpt(checkpoint.replace('chkpnt', 'env_light'), True)
+            direct_light.create_from_ckpt(checkpoint.replace('chkpnt', 'env_light'), opt, True)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -143,8 +144,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     use_density_prune = True
     for iteration in range(first_iter, opt.iterations + 1):
-        if iteration > 30000:
-            use_density_prune = False
+        # if iteration > 30000:
+        #     use_density_prune = False
         
         iter_start.record()
         xyz_lr = gaussians.update_learning_rate(iteration)
@@ -243,8 +244,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image_weight = (image_weight).clamp(0,1).detach() ** 2
 
             # normal_loss = weight * (1 - (F.cosine_similarity(depth_normal, normal, dim=0)).mean())
-            normal_loss = opt.single_view_weight * ((((depth_normal - normal)).abs().sum(0))).mean()
-            loss += (normal_loss)
+            single_view_weight = opt.single_view_weight + 0.1 * max((iteration - opt.single_view_weight_from_iter) / (60000 - opt.single_view_weight_from_iter), 1.0)
+            normal_loss = single_view_weight * ((((depth_normal - normal)).abs().sum(0))).mean()
+            loss += normal_loss
                     
             
 
@@ -446,16 +448,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.max_radii2D[mask] = torch.max(gaussians.max_radii2D[mask], radii[mask])
                     gaussians.add_densification_stats(viewspace_point_tensor, render_pkg["viewspace_points_abs"], visibility_filter)
 
-                    if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                        inner_mask = (render_pkg["inner_observe"] > 0) & render_pkg["inner_vis_filter"]
-                        inner_gaussians.max_radii2D[inner_mask] = torch.max(inner_gaussians.max_radii2D[inner_mask], render_pkg["inner_radii"][inner_mask])
-                        inner_gaussians.add_densification_stats(render_pkg["inner_viewspace_points"], render_pkg["inner_viewspace_points_abs"], render_pkg["inner_vis_filter"])
+                    # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                    #     inner_mask = (render_pkg["inner_observe"] > 0) & render_pkg["inner_vis_filter"]
+                    #     inner_gaussians.max_radii2D[inner_mask] = torch.max(inner_gaussians.max_radii2D[inner_mask], render_pkg["inner_radii"][inner_mask])
+                    #     inner_gaussians.add_densification_stats(render_pkg["inner_viewspace_points"], render_pkg["inner_viewspace_points_abs"], render_pkg["inner_vis_filter"])
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
+                        
                         if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                            inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
+                            dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)
+                            inner_gaussians.relocate_gs(dead_mask=dead_mask)
+                            inner_gaussians.add_new_gs(cap_max=-1)
+                        # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        #     inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
             
                 # multi-view observe trim
                 if opt.use_multi_view_trim and iteration % 1000 == 0 and iteration < opt.densify_until_iter:
@@ -470,11 +477,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.prune_points(prune_mask)
 
                 # reset_opacity
-                if iteration < opt.densify_until_iter:
+                if iteration < 40000:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
-                        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                            inner_gaussians.reset_opacity()
+                        # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        #     inner_gaussians.reset_opacity()
 
                 # Optimizer step
                 if iteration < opt.iterations:
@@ -486,6 +493,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
                         inner_gaussians.optimizer.step()
                         inner_gaussians.optimizer.zero_grad(set_to_none = True)
+
+                        inner_gaussians.add_noise(xyz_lr)
 
                     if gaussians.use_pbr:
                         direct_light.step()
@@ -607,9 +616,9 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-100)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000, 50_000, 80_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000, 50_000, 80_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

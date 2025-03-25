@@ -83,7 +83,7 @@ class Camera(nn.Module):
             mask_path = os.path.join(mask_path, self.image_name + '.png')
             if os.path.exists(mask_path):
                 self.mask = torch.tensor(cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)).to(self.data_device).squeeze()/255
-                self.mask = erode(self.mask[None,None].float()).squeeze()
+                # self.mask = erode(self.mask[None,None].float()).squeeze()
                 self.mask = torch.nn.functional.interpolate(self.mask[None,None], size=(image_height,image_width), mode='bilinear', align_corners=False).squeeze()
                 self.mask = (self.mask >= 0.5).to(self.data_device)
 

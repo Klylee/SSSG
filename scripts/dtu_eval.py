@@ -2,11 +2,9 @@ import numpy as np
 import open3d as o3d
 import sklearn.neighbors as skln
 from tqdm import tqdm
-from scipy.io import loadmat
 import multiprocessing as mp
-import argparse, os, csv
-import pytorch3d.loss.chamfer
-import matplotlib.cm as cm
+import argparse, os
+import cv2
 
 print("Current working directory:", os.getcwd())
 import sys
@@ -116,6 +114,7 @@ if __name__ == '__main__':
     reconstructed_mesh_file = 'tsdf_fusion_post.obj'
     # reconstructed_mesh_file = 'tsdf_fusion_post-pgsr2.obj'
     # reconstructed_mesh_file = 'chinesedragon_without_ncc_loss.ply'
+    # reconstructed_mesh_file = '00080000.ply'
 
     # reconstructed_mesh_file = 'filtered_mesh_pgsr.obj'
     # reconstructed_mesh_file = 'filtered_tsdf_fusion_post.obj'
@@ -161,14 +160,20 @@ if __name__ == '__main__':
                     point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
                     point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
                     
-                    mask = binary_dilation((camera.mask).float(), 8).bool()
+                    mask = binary_dilation((camera.mask).float(), 5).bool()
                     valid = in_image & mask[point2d[:, 1].long(), point2d[:, 0].long()]
                     visibility &= valid.cpu().numpy()
 
-                    # point_valid = point2d[valid]
-                    # image = torch.zeros([camera.image_height, camera.image_width], dtype=torch.uint8)
-                    # image[point_valid[:, 1].long(), point_valid[:, 0].long()] = 255
-                    # cv2.imwrite(f"debug/{camera.image_name}.png", image.cpu().numpy())
+                    point_valid = point2d[valid]
+                    image = torch.zeros([3, camera.image_height, camera.image_width], dtype=torch.uint8)
+                    mask_bg = torch.zeros_like(image)
+                    mask_bg[0, :, :] = mask.float() * 255
+                    image = image + mask_bg
+                    image[0, point_valid[:, 1].long(), point_valid[:, 0].long()] = 255
+                    image[1, point_valid[:, 1].long(), point_valid[:, 0].long()] = 255
+                    image[2, point_valid[:, 1].long(), point_valid[:, 0].long()] = 255
+                    image = image.clamp(0, 255).permute(1, 2, 0)
+                    cv2.imwrite(f"debug/{camera.image_name}.png", image.cpu().numpy())
 
             new_vertices = reconstructed_mesh.vertices[visibility]
             old_to_new_map = -np.ones(reconstructed_mesh.vertices.shape[0], dtype=np.int64)

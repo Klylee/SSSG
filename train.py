@@ -105,7 +105,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     
     scene_name = dataset.model_path.split('/')[-2]
     checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt30000.pth"
-    if checkpoint:
+    if checkpoint and os.path.exists(checkpoint):
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
         app_model.load_weights(scene.model_path)
@@ -144,8 +144,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     use_density_prune = True
     for iteration in range(first_iter, opt.iterations + 1):
-        # if iteration > 30000:
-        #     use_density_prune = False
+        if iteration > 60000:
+            use_density_prune = False
         
         iter_start.record()
         xyz_lr = gaussians.update_learning_rate(iteration)
@@ -196,7 +196,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # <start> 2025-03-12
         # restrain the inner_gs to the inner part of the model
-        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start + 1000:
+        if use_inner_gs and use_density_prune:
             inner_gs_points = torch.cat([inner_gaussians.get_xyz, torch.ones([inner_gaussians.get_xyz.shape[0], 1], device="cuda")], dim=-1)
             cam_points =  inner_gs_points @ viewpoint_cam.full_proj_transform
             ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
@@ -212,8 +212,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             inner_opacity = inner_gaussians.get_opacity
             inner_opacity = inner_opacity[in_image]
-            inner_opacity = inner_opacity[depth_diff > 0 - 0.0001]
-            inner_restrain_loss = 0.5 * inner_opacity.mean()
+            inner_opacity = inner_opacity[depth_diff > 0 - 0.00001]
+            inner_restrain_loss = 0.1 * inner_opacity.mean()
             loss += inner_restrain_loss
 
             ratio = inner_opacity.shape[0] / inner_gaussians.get_opacity.shape[0]
@@ -232,7 +232,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # mask loss
             mask = viewpoint_cam.mask.float()
             loss_mask = l1_loss(render_pkg['alpha'], mask)
-            loss += 0.05 * loss_mask
+            loss += 0.05 * loss_mask + 0.9 * min((iteration - opt.single_view_weight_from_iter) / (80000 - opt.single_view_weight_from_iter), 1.0)
 
             normal = render_pkg["rendered_normal"]
             depth_normal = render_pkg["depth_normal"]
@@ -244,7 +244,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image_weight = (image_weight).clamp(0,1).detach() ** 2
 
             # normal_loss = weight * (1 - (F.cosine_similarity(depth_normal, normal, dim=0)).mean())
-            single_view_weight = opt.single_view_weight + 0.1 * max((iteration - opt.single_view_weight_from_iter) / (60000 - opt.single_view_weight_from_iter), 1.0)
+            single_view_weight = opt.single_view_weight + 0.1 * min((iteration - opt.single_view_weight_from_iter) / (80000 - opt.single_view_weight_from_iter), 1.0)
             normal_loss = single_view_weight * ((((depth_normal - normal)).abs().sum(0))).mean()
             loss += normal_loss
                     
@@ -264,7 +264,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 loss_base_color_smooth = first_order_edge_aware_loss(rendered_base_color * mask, gt_image)
                 loss_roughness_smooth = first_order_edge_aware_loss(rendered_roughness.unsqueeze(0) * mask, gt_image)
 
-                weight = 1.2
+                weight = 1.3
                 # if iteration > 65000:
                 #     weight = 1.7
                 if iteration > opt.single_view_weight_from_iter + 2000:
@@ -319,60 +319,60 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if d_mask.sum() > 0:
                     geo_loss = geo_weight * ((weights * pixel_noise)[d_mask]).mean()
                     loss += geo_loss
-                    if use_virtul_cam is False:
-                        with torch.no_grad():
-                            ## sample mask
-                            d_mask = d_mask.reshape(-1)
-                            valid_indices = torch.arange(d_mask.shape[0], device=d_mask.device)[d_mask]
-                            if d_mask.sum() > sample_num:
-                                index = np.random.choice(d_mask.sum().cpu().numpy(), sample_num, replace = False)
-                                valid_indices = valid_indices[index]
+                    # if use_virtul_cam is False:
+                    #     with torch.no_grad():
+                    #         ## sample mask
+                    #         d_mask = d_mask.reshape(-1)
+                    #         valid_indices = torch.arange(d_mask.shape[0], device=d_mask.device)[d_mask]
+                    #         if d_mask.sum() > sample_num:
+                    #             index = np.random.choice(d_mask.sum().cpu().numpy(), sample_num, replace = False)
+                    #             valid_indices = valid_indices[index]
 
-                            weights = weights.reshape(-1)[valid_indices]
-                            ## sample ref frame patch
-                            pixels = pixels.reshape(-1,2)[valid_indices]
-                            offsets = patch_offsets(patch_size, pixels.device)
-                            ori_pixels_patch = pixels.reshape(-1, 1, 2) / viewpoint_cam.ncc_scale + offsets.float()
+                    #         weights = weights.reshape(-1)[valid_indices]
+                    #         ## sample ref frame patch
+                    #         pixels = pixels.reshape(-1,2)[valid_indices]
+                    #         offsets = patch_offsets(patch_size, pixels.device)
+                    #         ori_pixels_patch = pixels.reshape(-1, 1, 2) / viewpoint_cam.ncc_scale + offsets.float()
                             
-                            H, W = gt_image_gray.squeeze().shape
-                            pixels_patch = ori_pixels_patch.clone()
-                            pixels_patch[:, :, 0] = 2 * pixels_patch[:, :, 0] / (W - 1) - 1.0
-                            pixels_patch[:, :, 1] = 2 * pixels_patch[:, :, 1] / (H - 1) - 1.0
-                            ref_gray_val = F.grid_sample(gt_image_gray.unsqueeze(1), pixels_patch.view(1, -1, 1, 2), align_corners=True)
-                            ref_gray_val = ref_gray_val.reshape(-1, total_patch_size)
+                    #         H, W = gt_image_gray.squeeze().shape
+                    #         pixels_patch = ori_pixels_patch.clone()
+                    #         pixels_patch[:, :, 0] = 2 * pixels_patch[:, :, 0] / (W - 1) - 1.0
+                    #         pixels_patch[:, :, 1] = 2 * pixels_patch[:, :, 1] / (H - 1) - 1.0
+                    #         ref_gray_val = F.grid_sample(gt_image_gray.unsqueeze(1), pixels_patch.view(1, -1, 1, 2), align_corners=True)
+                    #         ref_gray_val = ref_gray_val.reshape(-1, total_patch_size)
 
-                            ref_to_neareast_r = nearest_cam.world_view_transform[:3,:3].transpose(-1,-2) @ viewpoint_cam.world_view_transform[:3,:3]
-                            ref_to_neareast_t = -ref_to_neareast_r @ viewpoint_cam.world_view_transform[3,:3] + nearest_cam.world_view_transform[3,:3]
+                    #         ref_to_neareast_r = nearest_cam.world_view_transform[:3,:3].transpose(-1,-2) @ viewpoint_cam.world_view_transform[:3,:3]
+                    #         ref_to_neareast_t = -ref_to_neareast_r @ viewpoint_cam.world_view_transform[3,:3] + nearest_cam.world_view_transform[3,:3]
 
-                        ## compute Homography
-                        ref_local_n = render_pkg["rendered_normal"].permute(1,2,0)
-                        ref_local_n = ref_local_n.reshape(-1,3)[valid_indices]
+                    #     ## compute Homography
+                    #     ref_local_n = render_pkg["rendered_normal"].permute(1,2,0)
+                    #     ref_local_n = ref_local_n.reshape(-1,3)[valid_indices]
 
-                        ref_local_d = render_pkg['rendered_distance'].squeeze()
+                    #     ref_local_d = render_pkg['rendered_distance'].squeeze()
 
-                        ref_local_d = ref_local_d.reshape(-1)[valid_indices]
-                        H_ref_to_neareast = ref_to_neareast_r[None] - \
-                            torch.matmul(ref_to_neareast_t[None,:,None].expand(ref_local_d.shape[0],3,1), 
-                                        ref_local_n[:,:,None].expand(ref_local_d.shape[0],3,1).permute(0, 2, 1))/ref_local_d[...,None,None]
-                        H_ref_to_neareast = torch.matmul(nearest_cam.get_k(nearest_cam.ncc_scale)[None].expand(ref_local_d.shape[0], 3, 3), H_ref_to_neareast)
-                        H_ref_to_neareast = H_ref_to_neareast @ viewpoint_cam.get_inv_k(viewpoint_cam.ncc_scale)
+                    #     ref_local_d = ref_local_d.reshape(-1)[valid_indices]
+                    #     H_ref_to_neareast = ref_to_neareast_r[None] - \
+                    #         torch.matmul(ref_to_neareast_t[None,:,None].expand(ref_local_d.shape[0],3,1), 
+                    #                     ref_local_n[:,:,None].expand(ref_local_d.shape[0],3,1).permute(0, 2, 1))/ref_local_d[...,None,None]
+                    #     H_ref_to_neareast = torch.matmul(nearest_cam.get_k(nearest_cam.ncc_scale)[None].expand(ref_local_d.shape[0], 3, 3), H_ref_to_neareast)
+                    #     H_ref_to_neareast = H_ref_to_neareast @ viewpoint_cam.get_inv_k(viewpoint_cam.ncc_scale)
                         
-                        ## compute neareast frame patch
-                        grid = patch_warp(H_ref_to_neareast.reshape(-1,3,3), ori_pixels_patch)
-                        grid[:, :, 0] = 2 * grid[:, :, 0] / (W - 1) - 1.0
-                        grid[:, :, 1] = 2 * grid[:, :, 1] / (H - 1) - 1.0
-                        _, nearest_image_gray = nearest_cam.get_image()
-                        sampled_gray_val = F.grid_sample(nearest_image_gray[None], grid.reshape(1, -1, 1, 2), align_corners=True)
-                        sampled_gray_val = sampled_gray_val.reshape(-1, total_patch_size)
+                    #     ## compute neareast frame patch
+                    #     grid = patch_warp(H_ref_to_neareast.reshape(-1,3,3), ori_pixels_patch)
+                    #     grid[:, :, 0] = 2 * grid[:, :, 0] / (W - 1) - 1.0
+                    #     grid[:, :, 1] = 2 * grid[:, :, 1] / (H - 1) - 1.0
+                    #     _, nearest_image_gray = nearest_cam.get_image()
+                    #     sampled_gray_val = F.grid_sample(nearest_image_gray[None], grid.reshape(1, -1, 1, 2), align_corners=True)
+                    #     sampled_gray_val = sampled_gray_val.reshape(-1, total_patch_size)
                         
-                        ## compute loss
-                        ncc, ncc_mask = lncc(ref_gray_val, sampled_gray_val)
-                        mask = ncc_mask.reshape(-1)
-                        ncc = ncc.reshape(-1) * weights
-                        ncc = ncc[mask].squeeze()
+                    #     ## compute loss
+                    #     ncc, ncc_mask = lncc(ref_gray_val, sampled_gray_val)
+                    #     mask = ncc_mask.reshape(-1)
+                    #     ncc = ncc.reshape(-1) * weights
+                    #     ncc = ncc[mask].squeeze()
 
-                        if mask.sum() > 0:
-                            ncc_loss = ncc_weight * ncc.mean()
+                    #     if mask.sum() > 0:
+                    #         ncc_loss = ncc_weight * ncc.mean()
                             # loss += ncc_loss
 
         loss.backward()
@@ -448,21 +448,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.max_radii2D[mask] = torch.max(gaussians.max_radii2D[mask], radii[mask])
                     gaussians.add_densification_stats(viewspace_point_tensor, render_pkg["viewspace_points_abs"], visibility_filter)
 
-                    # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                    #     inner_mask = (render_pkg["inner_observe"] > 0) & render_pkg["inner_vis_filter"]
-                    #     inner_gaussians.max_radii2D[inner_mask] = torch.max(inner_gaussians.max_radii2D[inner_mask], render_pkg["inner_radii"][inner_mask])
-                    #     inner_gaussians.add_densification_stats(render_pkg["inner_viewspace_points"], render_pkg["inner_viewspace_points_abs"], render_pkg["inner_vis_filter"])
+                    if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        inner_mask = (render_pkg["inner_observe"] > 0) & render_pkg["inner_vis_filter"]
+                        inner_gaussians.max_radii2D[inner_mask] = torch.max(inner_gaussians.max_radii2D[inner_mask], render_pkg["inner_radii"][inner_mask])
+                        inner_gaussians.add_densification_stats(render_pkg["inner_viewspace_points"], render_pkg["inner_viewspace_points_abs"], render_pkg["inner_vis_filter"])
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
                         
-                        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                            dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)
-                            inner_gaussians.relocate_gs(dead_mask=dead_mask)
-                            inner_gaussians.add_new_gs(cap_max=-1)
                         # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                        #     inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
+                        #     dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)
+                        #     inner_gaussians.relocate_gs(dead_mask=dead_mask)
+                        #     inner_gaussians.add_new_gs(cap_max=-1)
+                        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                            inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
             
                 # multi-view observe trim
                 if opt.use_multi_view_trim and iteration % 1000 == 0 and iteration < opt.densify_until_iter:
@@ -477,11 +477,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.prune_points(prune_mask)
 
                 # reset_opacity
-                if iteration < 40000:
+                if iteration < opt.densify_until_iter:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
-                        # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                        #     inner_gaussians.reset_opacity()
+                        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                            inner_gaussians.reset_opacity()
 
                 # Optimizer step
                 if iteration < opt.iterations:
@@ -494,7 +494,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         inner_gaussians.optimizer.step()
                         inner_gaussians.optimizer.zero_grad(set_to_none = True)
 
-                        inner_gaussians.add_noise(xyz_lr)
+                        # inner_gaussians.add_noise(xyz_lr)
 
                     if gaussians.use_pbr:
                         direct_light.step()
@@ -616,9 +616,9 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-100)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000, 90_000, 100_000, 110_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000, 90_000, 100_000, 110_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

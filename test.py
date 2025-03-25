@@ -6,6 +6,7 @@ import open3d as o3d
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from argparse import ArgumentParser
 import sys
+from scene.direct_light_map import DirectLightMap
 
 parser = ArgumentParser(description="Training script parameters")
 lp = ModelParams(parser)
@@ -25,23 +26,27 @@ args.save_iterations.append(args.iterations)
 
 print("Optimizing " + args.model_path)
 
-gaussians = GaussianModel(3)
-checkpoint = "./output_neuralto/chinesedragon/test/inner_chkpnt80000.pth"
-(model_params, first_iter) = torch.load(checkpoint)
-gaussians.restore(model_params, op.extract(args))
+# gaussians = GaussianModel(3)
+# checkpoint = "./output_neuralto/chinesedragon/test/inner_chkpnt80000.pth"
+# (model_params, first_iter) = torch.load(checkpoint)
+# gaussians.restore(model_params, op.extract(args))
 
-# gaussians.load_ply('./output_neuralto/yuanbao/test/point_cloud/iteration_80000/point_cloud.ply')
-opacity = gaussians.get_opacity
+# # gaussians.load_ply('./output_neuralto/yuanbao/test/point_cloud/iteration_80000/point_cloud.ply')
+# opacity = gaussians.get_opacity
 
-opacity_filter = (opacity.squeeze()) > 0.1
-centers = gaussians.get_xyz
-centers = centers[opacity_filter]
+# opacity_filter = (opacity.squeeze()) > 0.1
+# centers = gaussians.get_xyz
+# centers = centers[opacity_filter]
 
-point_cloud = o3d.geometry.PointCloud()
+# point_cloud = o3d.geometry.PointCloud()
 
-# 设置点云的点和颜色
-point_cloud.points = o3d.utility.Vector3dVector(centers.tolist())  # 设置点坐标
-point_cloud.colors = o3d.utility.Vector3dVector(torch.zeros_like(centers).tolist())  # 设置点颜色
+# # 设置点云的点和颜色
+# point_cloud.points = o3d.utility.Vector3dVector(centers.tolist())  # 设置点坐标
+# point_cloud.colors = o3d.utility.Vector3dVector(torch.zeros_like(centers).tolist())  # 设置点颜色
 
-# 保存点云到文件，例如保存为 PLY 格式
-o3d.io.write_point_cloud("output.ply", point_cloud)
+# # 保存点云到文件，例如保存为 PLY 格式
+# o3d.io.write_point_cloud("output.ply", point_cloud)
+
+checkpoint = "./output_neuralto/chinesedragon/test/env_light80000.pth"
+direct_light = DirectLightMap()
+direct_light.create_from_ckpt(checkpoint, op.extract(args))

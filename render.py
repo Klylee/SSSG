@@ -61,6 +61,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         rendering = out["render"].clamp(0.0, 1.0)
         _, H, W = rendering.shape
 
+        # mask = view.mask.
         depth = out["plane_depth"].squeeze()
         alpha = out["alpha"].squeeze()
         depth_tsdf = depth.clone() * alpha
@@ -209,7 +210,7 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
-    parser.add_argument("--iteration", default=-1, type=int)
+    parser.add_argument("--it", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
@@ -224,8 +225,8 @@ if __name__ == "__main__":
     args.eval = True
     args.use_depth_filter = True
 
-    args.iteration = 50000
+    # args.iteration = 80000
     # Initialize system state (RNG)
     safe_state(args.quiet)
     print(f"multi_view_num {model.multi_view_num}")
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.max_depth, args.voxel_size, args.use_depth_filter)
+    render_sets(model.extract(args), args.it, pipeline.extract(args), args.skip_train, args.skip_test, args.max_depth, args.voxel_size, args.use_depth_filter)

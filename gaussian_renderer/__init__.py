@@ -231,25 +231,26 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             all_map = input_all_map_all,
             cov3D_precomp = cov3D_precomp)
         
-        
+        only_inner = False
         if inner_gs is not None:
-            # _, radii_inner, observe_inner, _, _ = rasterizer(
-            #     means3D = inner_means3D,
-            #     means2D = inner_means2D,
-            #     means2D_abs = inner_means2D_abs,
-            #     shs = inner_shs,
-            #     colors_precomp = colors_precomp,
-            #     opacities = inner_opacity,
-            #     scales = inner_scales,
-            #     rotations = inner_rotations,
-            #     all_map = inner_input_all_map,
-            #     cov3D_precomp = cov3D_precomp)
+            if only_inner:
+                _, radii_inner, observe_inner, out, _ = rasterizer(
+                    means3D = inner_means3D,
+                    means2D = inner_means2D,
+                    means2D_abs = inner_means2D_abs,
+                    shs = inner_shs,
+                    colors_precomp = colors_precomp,
+                    opacities = inner_opacity,
+                    scales = inner_scales,
+                    rotations = inner_rotations,
+                    all_map = inner_input_all_map,
+                    cov3D_precomp = cov3D_precomp)
             
-            # inner_radii = radii_inner
-            # inner_observe = observe_inner
-            
-            inner_radii = radii_all[means3D.shape[0]:]
-            inner_observe = observe_all[means3D.shape[0]:]
+                inner_radii = radii_inner
+                inner_observe = observe_inner
+            else:
+                inner_radii = radii_all[means3D.shape[0]:]
+                inner_observe = observe_all[means3D.shape[0]:]
 
         
             rendered_alpha1 = out[3, ] 

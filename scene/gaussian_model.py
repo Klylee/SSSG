@@ -1161,6 +1161,6 @@ class GaussianModel:
             def op_sigmoid(x, k=100, x0=0.995):
                 return 1 / (1 + torch.exp(-k * (x - x0)))
             
-            noise = torch.randn_like(self._xyz) * (op_sigmoid(1 - self.get_opacity)) * 5e5 * xyz_lr
+            noise = torch.randn_like(self._xyz) * (op_sigmoid(1 - self.get_opacity)) * 5e4 * xyz_lr
             noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
             self._xyz.add_(noise)

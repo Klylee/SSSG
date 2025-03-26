@@ -231,7 +231,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             all_map = input_all_map_all,
             cov3D_precomp = cov3D_precomp)
         
-        only_inner = False
+        only_inner = True
         if inner_gs is not None:
             if only_inner:
                 _, radii_inner, observe_inner, out, _ = rasterizer(

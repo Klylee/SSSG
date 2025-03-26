@@ -86,7 +86,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     cmd = f'cp -rf ./utils {dataset.model_path}/'
     os.system(cmd)
     
-    os.system(f'rm -rf {dataset.model_path}/debug')
+    # os.system(f'rm -rf {dataset.model_path}/debug')
     # os.system(f'rm -rf {dataset.model_path}/app_model')
 
     gaussians = GaussianModel(dataset.sh_degree)
@@ -142,6 +142,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     inner_gs_start = 1000
     ratio = 1.0
 
+    camera = scene.getTrainCameras()[0]
+    print(f'{camera.resolution} {camera.ncc_scale}')
+
     use_density_prune = True
     for iteration in range(first_iter, opt.iterations + 1):
         if iteration > 60000:
@@ -196,7 +199,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # <start> 2025-03-12
         # restrain the inner_gs to the inner part of the model
-        if use_inner_gs and use_density_prune:
+        if use_inner_gs and use_density_prune == False:
             inner_gs_points = torch.cat([inner_gaussians.get_xyz, torch.ones([inner_gaussians.get_xyz.shape[0], 1], device="cuda")], dim=-1)
             cam_points =  inner_gs_points @ viewpoint_cam.full_proj_transform
             ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
@@ -477,7 +480,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.prune_points(prune_mask)
 
                 # reset_opacity
-                if iteration < opt.densify_until_iter:
+                if iteration < 39000:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
                         if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:

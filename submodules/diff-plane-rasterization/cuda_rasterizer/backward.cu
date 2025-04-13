@@ -412,6 +412,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		const float *__restrict__ all_maps,
 		const float *__restrict__ all_map_pixels,
 		const float *__restrict__ plane_depth_pixels,
+		const float *__restrict__ cova_cam_inv,
 		const float *__restrict__ final_Ts,
 		const uint32_t *__restrict__ n_contrib,
 		const float *__restrict__ dL_dpixels,
@@ -424,6 +425,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		float *__restrict__ dL_dopacity,
 		float *__restrict__ dL_dcolors,
 		float *__restrict__ dL_dall_map,
+		float *__restrict__ dL_dcova_cam_inv,
 		const bool render_geo)
 {
 	// We rasterize again. Compute necessary block info.
@@ -435,7 +437,6 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	const uint32_t pix_id = W * pix.y + pix.x;
 	const float2 pixf = {(float)pix.x, (float)pix.y};
 	const float2 ray = {(pixf.x - W * 0.5f) / fx, (pixf.y - H * 0.5f) / fy};
-	const float near = 0.01f;
 
 	const bool inside = pix.x < W && pix.y < H;
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
@@ -451,6 +452,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
 	__shared__ float collected_colors[C * BLOCK_SIZE];
 	__shared__ float collected_all_maps[ALL_MAP_CHANNELS * BLOCK_SIZE];
+	__shared__ float collected_cova_cam_inv[6 * BLOCK_SIZE];
 
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors.
@@ -485,13 +487,13 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			}
 			dL_dout_plane_depth = dL_dout_plane_depths[pix_id];
 
-			const float3 normal = {all_map_pixels[pix_id], all_map_pixels[H * W + pix_id], all_map_pixels[2 * H * W + pix_id]};
-			const float distance = all_map_pixels[4 * H * W + pix_id];
-			const float tmp = (normal.x * ray.x + normal.y * ray.y + normal.z + 1.0e-8);
-			dL_dout_all_map[4] += (-dL_dout_plane_depths[pix_id] / tmp);
-			dL_dout_all_map[0] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp) * ray.x);
-			dL_dout_all_map[1] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp) * ray.y);
-			dL_dout_all_map[2] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp));
+			// const float3 normal = {all_map_pixels[pix_id], all_map_pixels[H * W + pix_id], all_map_pixels[2 * H * W + pix_id]};
+			// const float distance = all_map_pixels[4 * H * W + pix_id];
+			// const float tmp = (normal.x * ray.x + normal.y * ray.y + normal.z + 1.0e-8);
+			// dL_dout_all_map[4] += (-dL_dout_plane_depths[pix_id] / tmp);
+			// dL_dout_all_map[0] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp) * ray.x);
+			// dL_dout_all_map[1] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp) * ray.y);
+			// dL_dout_all_map[2] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp));
 		}
 	}
 	// If grad is too small, skip
@@ -529,6 +531,10 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			{
 				for (int i = 0; i < ALL_MAP_CHANNELS; i++)
 					collected_all_maps[i * BLOCK_SIZE + block.thread_rank()] = all_maps[coll_id * ALL_MAP_CHANNELS + i];
+				
+				for (int i = 0; i < 6; i++) {
+					collected_cova_cam_inv[i * BLOCK_SIZE + block.thread_rank()] = cova_cam_inv[coll_id * 6 + i];
+				}
 			}
 		}
 		block.sync();
@@ -546,7 +552,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			const float2 xy = collected_xy[j];
 			const float2 d = {xy.x - pixf.x, xy.y - pixf.y};
 
-			// float3 mean3D_view = collected_means3D_view[j];
+			float3 mean3D_view = collected_means3D_view[j];
 			// float ray_norm_sqr = ray.x * ray.x + ray.y * ray.y + 1;
 			// float depth_test = (ray.x * mean3D_view.x + ray.y * mean3D_view.y + mean3D_view.z) / ray_norm_sqr;
 
@@ -599,10 +605,62 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 					atomicAdd(&(dL_dall_map[global_id * ALL_MAP_CHANNELS + ch]), dchannel_dcolor * dL_dchannel);
 				}
 
-				// accum_depth = last_alpha * last_depth + (1.f - last_alpha) * accum_depth;
-				// last_depth = depth_test;
+				const float cova_cam_inv_0 = collected_cova_cam_inv[0 * BLOCK_SIZE + j];
+				const float cova_cam_inv_1 = collected_cova_cam_inv[1 * BLOCK_SIZE + j];
+				const float cova_cam_inv_2 = collected_cova_cam_inv[2 * BLOCK_SIZE + j];
+				const float cova_cam_inv_3 = collected_cova_cam_inv[3 * BLOCK_SIZE + j];
+				const float cova_cam_inv_4 = collected_cova_cam_inv[4 * BLOCK_SIZE + j];
+				const float cova_cam_inv_5 = collected_cova_cam_inv[5 * BLOCK_SIZE + j];
 
-				// dL_dalpha += (depth_test - accum_depth) * dL_dout_plane_depth;
+				float k1 = ray.x * cova_cam_inv_0 + ray.y * cova_cam_inv_1 + cova_cam_inv_2;
+				float k2 = ray.x * cova_cam_inv_1 + ray.y * cova_cam_inv_3 + cova_cam_inv_4;
+				float k3 = ray.x * cova_cam_inv_2 + ray.y * cova_cam_inv_4 + cova_cam_inv_5;
+				float t1 = k1 * mean3D_view.x + k2 * mean3D_view.y + k3 * mean3D_view.z;
+				float t2 = k1 * ray.x + k2 * ray.y + k3;
+				float depth = t1 / (t2 + 1.0e-8);
+
+				accum_depth = last_alpha * last_depth + (1.f - last_alpha) * accum_depth;
+				last_depth = depth;
+
+				dL_dalpha += (depth - accum_depth) * dL_dout_plane_depth;
+
+				float ddepth_dt1 = 1.0f / (t2 + 1.0e-8);
+				float ddepth_dt2 = -t1 / (t2 * t2 + 1.0e-8);
+				float ddepth_dmean3D_view_x = ddepth_dt1 * k1;
+				float ddepth_dmean3D_view_y = ddepth_dt1 * k2;
+				float ddepth_dmean3D_view_z = ddepth_dt1 * k3;
+
+				float dt1_dcova_cam_inv_0 = ray.x * mean3D_view.x;
+				float dt1_dcova_cam_inv_1 = ray.y * mean3D_view.x + ray.x * mean3D_view.y;
+				float dt1_dcova_cam_inv_2 = mean3D_view.x + ray.x * mean3D_view.z;
+				float dt1_dcova_cam_inv_3 = ray.y * mean3D_view.y;
+				float dt1_dcova_cam_inv_4 = mean3D_view.y + ray.y * mean3D_view.z;
+				float dt1_dcova_cam_inv_5 = mean3D_view.z;
+
+				float dt2_dcova_cam_inv_0 = ray.x * ray.x;
+				float dt2_dcova_cam_inv_1 = ray.y * ray.x + ray.x * ray.y;
+				float dt2_dcova_cam_inv_2 = ray.x + ray.x;
+				float dt2_dcova_cam_inv_3 = ray.y * ray.y;
+				float dt2_dcova_cam_inv_4 = ray.y + ray.y;
+				float dt2_dcova_cam_inv_5 = 1.0f;
+
+				float ddepth_dcova_cam_inv_0 = ddepth_dt1 * dt1_dcova_cam_inv_0 + ddepth_dt2 * dt2_dcova_cam_inv_0;
+				float ddepth_dcova_cam_inv_1 = ddepth_dt1 * dt1_dcova_cam_inv_1 + ddepth_dt2 * dt2_dcova_cam_inv_1;
+				float ddepth_dcova_cam_inv_2 = ddepth_dt1 * dt1_dcova_cam_inv_2 + ddepth_dt2 * dt2_dcova_cam_inv_2;
+				float ddepth_dcova_cam_inv_3 = ddepth_dt1 * dt1_dcova_cam_inv_3 * ddepth_dt2 * dt2_dcova_cam_inv_3;
+				float ddepth_dcova_cam_inv_4 = ddepth_dt1 * dt1_dcova_cam_inv_4 * ddepth_dt2 * dt2_dcova_cam_inv_4;
+				float ddepth_dcova_cam_inv_5 = ddepth_dt1 * dt1_dcova_cam_inv_5 * ddepth_dt2 * dt2_dcova_cam_inv_5;
+
+				atomicAdd(&(dL_dmeans3D_view[global_id].x), dL_dout_plane_depth * dchannel_dcolor * ddepth_dmean3D_view_x);
+				atomicAdd(&(dL_dmeans3D_view[global_id].y), dL_dout_plane_depth * dchannel_dcolor * ddepth_dmean3D_view_y);
+				atomicAdd(&(dL_dmeans3D_view[global_id].z), dL_dout_plane_depth * dchannel_dcolor * ddepth_dmean3D_view_z);
+
+				atomicAdd(&(dL_dcova_cam_inv[global_id * 6 + 0]), dL_dout_plane_depth * dchannel_dcolor * ddepth_dcova_cam_inv_0);
+				atomicAdd(&(dL_dcova_cam_inv[global_id * 6 + 1]), dL_dout_plane_depth * dchannel_dcolor * ddepth_dcova_cam_inv_1);
+				atomicAdd(&(dL_dcova_cam_inv[global_id * 6 + 2]), dL_dout_plane_depth * dchannel_dcolor * ddepth_dcova_cam_inv_2);
+				atomicAdd(&(dL_dcova_cam_inv[global_id * 6 + 3]), dL_dout_plane_depth * dchannel_dcolor * ddepth_dcova_cam_inv_3);
+				atomicAdd(&(dL_dcova_cam_inv[global_id * 6 + 4]), dL_dout_plane_depth * dchannel_dcolor * ddepth_dcova_cam_inv_4);
+				atomicAdd(&(dL_dcova_cam_inv[global_id * 6 + 5]), dL_dout_plane_depth * dchannel_dcolor * ddepth_dcova_cam_inv_5);
 
 				// float dL_dchannel = dL_dout_plane_depth;
 				// float dchannel_dmeanx = ray.x / ray_norm_sqr;
@@ -730,6 +788,7 @@ void BACKWARD::render(
 	const float *all_maps,
 	const float *all_map_pixels,
 	const float *plane_depth_pixels,
+	const float *cova_cam_inv,
 	const float *final_Ts,
 	const uint32_t *n_contrib,
 	const float *dL_dpixels,
@@ -742,6 +801,7 @@ void BACKWARD::render(
 	float *dL_dopacity,
 	float *dL_dcolors,
 	float *dL_dall_map,
+	float *dL_dcova_cam_inv,
 	const bool render_geo)
 {
 	renderCUDA<NUM_CHANNELS, NUM_ALL_MAP><<<grid, block>>>(
@@ -757,6 +817,7 @@ void BACKWARD::render(
 		all_maps,
 		all_map_pixels,
 		plane_depth_pixels,
+		cova_cam_inv,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
@@ -769,5 +830,6 @@ void BACKWARD::render(
 		dL_dopacity,
 		dL_dcolors,
 		dL_dall_map,
+		dL_dcova_cam_inv,
 		render_geo);
 }

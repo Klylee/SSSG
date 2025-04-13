@@ -68,6 +68,8 @@ if __name__ == '__main__':
 
     dataset_file = f'/home/yuanyouwen/expdata/neuralto/{args.s}'
 
+    # args.resolution = 1
+    # args.ncc_scale = 1
 
     os.makedirs(f'debug/{args.s}', exist_ok=True)
     all_points = np.empty([0, 3])
@@ -80,15 +82,15 @@ if __name__ == '__main__':
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         
         # camera = all_cameras[0]
-        for camera in all_cameras:
+        for camera in tqdm(all_cameras, desc="Rendering"):
             out = render(camera, gaussians, pipeline, background)
 
             depth = out["plane_depth"].squeeze()
             alpha = out["alpha"].squeeze()
             normal = out["rendered_normal"].permute(1,2,0)
-            depth = depth.clone() * alpha
-            mask_bg = (alpha > 0.5).float()
-            depth = depth * mask_bg
+            depth = depth.clone() * camera.mask.float()
+            # mask_bg = (alpha > 0.5).float()
+            depth = depth #* mask_bg
             depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
             depth_i = (depth_i * 255).cpu().numpy().clip(0, 255).astype(np.uint8)
             depth_color = cv2.applyColorMap(depth_i, cv2.COLORMAP_JET)
@@ -118,19 +120,24 @@ if __name__ == '__main__':
                 point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
                 point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
                 
-                # mask = binary_dilation((camera.mask).float(), 5).bool()
-                mask = camera.mask
+                mask = binary_dilation((camera.mask).float(), 1).bool()
+                # mask = camera.mask
                 valid = in_image & mask[point2d[:, 1].long(), point2d[:, 0].long()]
                 visibility &= valid.cpu().numpy()
 
         all_points = all_points[visibility]
         all_normal = all_normal[visibility]
     
-    print(all_points.shape)
-    all_points, center, max_range = normalize_point_cloud(all_points)
-    print(f'trans: {center}, {max_range}')
+    # all_points, center, max_range = normalize_point_cloud(all_points)
+    # print(f'trans: {center}, {max_range}')
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(all_points)
     pcd.normals = o3d.utility.Vector3dVector(all_normal)
+    pcd = pcd.voxel_down_sample(voxel_size=0.002)
     pcd.orient_normals_consistent_tangent_plane(k=30)
+    print(len(pcd.points))
+    # with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+    #     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+    #         pcd, depth=9)
+    # o3d.io.write_triangle_mesh(f"debug/{args.s}_mesh.obj", mesh)
     o3d.io.write_point_cloud(f'debug/{args.s}_recon.ply', pcd)

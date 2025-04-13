@@ -86,7 +86,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     cmd = f'cp -rf ./utils {dataset.model_path}/'
     os.system(cmd)
     
-    # os.system(f'rm -rf {dataset.model_path}/debug')
+    os.system(f'rm -rf {dataset.model_path}/debug')
     # os.system(f'rm -rf {dataset.model_path}/app_model')
 
     gaussians = GaussianModel(dataset.sh_degree)
@@ -216,7 +216,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             inner_opacity = inner_gaussians.get_opacity
             inner_opacity = inner_opacity[in_image]
             inner_opacity = inner_opacity[depth_diff > 0 - 0.00001]
-            inner_restrain_loss = 0.1 * inner_opacity.mean()
+            inner_restrain_loss = 0.3 * inner_opacity.mean()
             loss += inner_restrain_loss
 
             ratio = inner_opacity.shape[0] / inner_gaussians.get_opacity.shape[0]
@@ -322,61 +322,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if d_mask.sum() > 0:
                     geo_loss = geo_weight * ((weights * pixel_noise)[d_mask]).mean()
                     loss += geo_loss
-                    # if use_virtul_cam is False:
-                    #     with torch.no_grad():
-                    #         ## sample mask
-                    #         d_mask = d_mask.reshape(-1)
-                    #         valid_indices = torch.arange(d_mask.shape[0], device=d_mask.device)[d_mask]
-                    #         if d_mask.sum() > sample_num:
-                    #             index = np.random.choice(d_mask.sum().cpu().numpy(), sample_num, replace = False)
-                    #             valid_indices = valid_indices[index]
 
-                    #         weights = weights.reshape(-1)[valid_indices]
-                    #         ## sample ref frame patch
-                    #         pixels = pixels.reshape(-1,2)[valid_indices]
-                    #         offsets = patch_offsets(patch_size, pixels.device)
-                    #         ori_pixels_patch = pixels.reshape(-1, 1, 2) / viewpoint_cam.ncc_scale + offsets.float()
-                            
-                    #         H, W = gt_image_gray.squeeze().shape
-                    #         pixels_patch = ori_pixels_patch.clone()
-                    #         pixels_patch[:, :, 0] = 2 * pixels_patch[:, :, 0] / (W - 1) - 1.0
-                    #         pixels_patch[:, :, 1] = 2 * pixels_patch[:, :, 1] / (H - 1) - 1.0
-                    #         ref_gray_val = F.grid_sample(gt_image_gray.unsqueeze(1), pixels_patch.view(1, -1, 1, 2), align_corners=True)
-                    #         ref_gray_val = ref_gray_val.reshape(-1, total_patch_size)
-
-                    #         ref_to_neareast_r = nearest_cam.world_view_transform[:3,:3].transpose(-1,-2) @ viewpoint_cam.world_view_transform[:3,:3]
-                    #         ref_to_neareast_t = -ref_to_neareast_r @ viewpoint_cam.world_view_transform[3,:3] + nearest_cam.world_view_transform[3,:3]
-
-                    #     ## compute Homography
-                    #     ref_local_n = render_pkg["rendered_normal"].permute(1,2,0)
-                    #     ref_local_n = ref_local_n.reshape(-1,3)[valid_indices]
-
-                    #     ref_local_d = render_pkg['rendered_distance'].squeeze()
-
-                    #     ref_local_d = ref_local_d.reshape(-1)[valid_indices]
-                    #     H_ref_to_neareast = ref_to_neareast_r[None] - \
-                    #         torch.matmul(ref_to_neareast_t[None,:,None].expand(ref_local_d.shape[0],3,1), 
-                    #                     ref_local_n[:,:,None].expand(ref_local_d.shape[0],3,1).permute(0, 2, 1))/ref_local_d[...,None,None]
-                    #     H_ref_to_neareast = torch.matmul(nearest_cam.get_k(nearest_cam.ncc_scale)[None].expand(ref_local_d.shape[0], 3, 3), H_ref_to_neareast)
-                    #     H_ref_to_neareast = H_ref_to_neareast @ viewpoint_cam.get_inv_k(viewpoint_cam.ncc_scale)
-                        
-                    #     ## compute neareast frame patch
-                    #     grid = patch_warp(H_ref_to_neareast.reshape(-1,3,3), ori_pixels_patch)
-                    #     grid[:, :, 0] = 2 * grid[:, :, 0] / (W - 1) - 1.0
-                    #     grid[:, :, 1] = 2 * grid[:, :, 1] / (H - 1) - 1.0
-                    #     _, nearest_image_gray = nearest_cam.get_image()
-                    #     sampled_gray_val = F.grid_sample(nearest_image_gray[None], grid.reshape(1, -1, 1, 2), align_corners=True)
-                    #     sampled_gray_val = sampled_gray_val.reshape(-1, total_patch_size)
-                        
-                    #     ## compute loss
-                    #     ncc, ncc_mask = lncc(ref_gray_val, sampled_gray_val)
-                    #     mask = ncc_mask.reshape(-1)
-                    #     ncc = ncc.reshape(-1) * weights
-                    #     ncc = ncc[mask].squeeze()
-
-                    #     if mask.sum() > 0:
-                    #         ncc_loss = ncc_weight * ncc.mean()
-                            # loss += ncc_loss
 
         loss.backward()
         iter_end.record()
@@ -480,6 +426,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.prune_points(prune_mask)
 
                 # reset_opacity
+                # if iteration < opt.densify_until_iter:
                 if iteration < 39000:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
@@ -525,7 +472,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         inner_gaussians.optimizer.step()
                         inner_gaussians.optimizer.zero_grad(set_to_none = True)
 
-                        inner_gaussians.add_noise(xyz_lr)
+                        inner_gaussians.add_noise(xyz_lr, surf=False)
 
                     if gaussians.use_pbr:
                         direct_light.step()
@@ -542,70 +489,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.save_weights(scene.model_path, opt.iterations)
     torch.cuda.empty_cache()
 
-def prepare_output_and_logger(args):    
-    if not args.model_path:
-        if os.getenv('OAR_JOB_ID'):
-            unique_str=os.getenv('OAR_JOB_ID')
-        else:
-            unique_str = str(uuid.uuid4())
-        args.model_path = os.path.join("./output/", unique_str[0:10])
-
-        
-    # Set up output folder
-    print("Output folder: {}".format(args.model_path))
-    os.makedirs(args.model_path, exist_ok = True)
-    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
-        cfg_log_f.write(str(Namespace(**vars(args))))
-
-    # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
-    return tb_writer
-
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, app_model):
-    if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
-
-    # Report test and samples of training set
-    if iteration in testing_iterations:
-        torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
-
-        for config in validation_configs:
-            if config['cameras'] and len(config['cameras']) > 0:
-                l1_test = 0.0
-                psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
-                    out = renderFunc(viewpoint, scene.gaussians, *renderArgs, app_model=app_model)
-                    image = out["render"]
-                    if 'app_image' in out:
-                        image = out['app_image']
-                    image = torch.clamp(image, 0.0, 1.0)
-                    gt_image, _ = viewpoint.get_image()
-                    gt_image = torch.clamp(gt_image.to("cuda"), 0.0, 1.0)
-                    if tb_writer and (idx < 5):
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
-                        if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
-                psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
-                if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
-
-        if tb_writer:
-            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     torch.set_num_threads(8)

@@ -43,6 +43,7 @@ namespace CudaRasterizer
 			const float *rotations,
 			const float *cov3D_precomp,
 			const float *all_map,
+			const float *conv_cam_inv,
 			const float *viewmatrix,
 			const float *projmatrix,
 			const float *cam_pos,
@@ -69,6 +70,7 @@ namespace CudaRasterizer
 			const float *scales,
 			const float scale_modifier,
 			const float *rotations,
+			const float *cova_cam_inv,
 			const float *cov3D_precomp,
 			const float *viewmatrix,
 			const float *projmatrix,
@@ -93,6 +95,7 @@ namespace CudaRasterizer
 			float *dL_dscale,
 			float *dL_drot,
 			float *dL_dall_map,
+			float *dL_dconv_cam_inv,
 			const bool render_geo,
 			bool debug);
 	};

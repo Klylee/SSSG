@@ -7,6 +7,7 @@ from scene.gaussian_model import GaussianModel
 from scene.app_model import AppModel
 from utils.sh_utils import eval_sh
 from utils.graphics_utils import normal_from_depth_image, rgb_to_srgb
+from utils.general_utils import strip_symmetric, build_scaling_rotation
 
 def render_normal(viewpoint_cam, depth, offset=None, normal=None, scale=1):
     # depth: (H, W), bg_color: (3), alpha: (H, W)
@@ -123,10 +124,19 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
     depth_z = pts_in_cam[:, 2]
     local_distance = (local_normal * pts_in_cam).sum(-1).abs()
-    input_all_map = torch.zeros((means3D.shape[0], 30)).cuda().float()
+    input_all_map = torch.zeros((means3D.shape[0], 20)).cuda().float()
     input_all_map[:, :3] = local_normal
     input_all_map[:, 3] = 1.0
     input_all_map[:, 4] = local_distance
+
+    scaling = 1.0 / (pc.get_scaling + 1.0e-8) # avoid 1/scaling == NaN if scaling too low
+    rotation = pc.get_rotation
+    L = build_scaling_rotation(scaling_modifier * scaling, rotation)
+    Sigma = L @ L.transpose(1, 2)
+    R_cam = viewpoint_camera.world_view_transform[:3, :3] # R_cam is the transpose of rotation matrix in graphics
+    cova_cam_inv = R_cam.T @ Sigma @ R_cam
+    cova_cam_inv = strip_symmetric(cova_cam_inv)
+    # print(f"c {cova_cam_inv.min()} {cova_cam_inv.max()}")
 
     F0 = None
     if pc.use_pbr and return_pbr and pc._incident_dirs.shape[0] == pc.get_incidents.shape[0]:
@@ -144,8 +154,11 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         input_all_map[:, 5:8] = extra_results["diffuse_light"]
         input_all_map[:, 8:11] = base_color
         input_all_map[:, 11] = roughness.squeeze()
-        input_all_map[:, 12:15] = extra_results["diffuse_light"]
-        input_all_map[:, 18:21] = extra_results["specular"]
+
+        surf_viewdirs = F.normalize(viewpoint_camera.camera_center - means3D, dim=-1)
+        surf_colors = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1,2).view(-1, 3, (pc.max_sh_degree + 1)**2), surf_viewdirs)
+        input_all_map[:, 12:15] = torch.clamp_min(surf_colors + 0.5, 0.0)
+        input_all_map[:, 12:15] += input_all_map[:, 5:8]
 
     rendered_image, radii, out_observe, out_all_map, plane_depth = rasterizer(
         means3D = means3D,
@@ -157,6 +170,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scales = scales,
         rotations = rotations,
         all_map = input_all_map,
+        trans_ctol = cova_cam_inv,
         cov3D_precomp = cov3D_precomp)
 
     rendered_normal = out_all_map[0:3]
@@ -202,11 +216,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             rotations_all = torch.cat([rotations, inner_rotations], dim=0)
 
             # cat input_all_map
-            inner_input_all_map = torch.zeros((inner_means3D.shape[0], 30)).cuda().float()
+            inner_input_all_map = torch.zeros((inner_means3D.shape[0], 20)).cuda().float()
 
             inner_viewdirs = F.normalize(viewpoint_camera.camera_center - inner_means3D, dim=-1)
             inner_colors = eval_sh(inner_gs.active_sh_degree, inner_gs.get_features.transpose(1,2).view(-1, 3, (inner_gs.max_sh_degree + 1)**2), inner_viewdirs)
             inner_input_all_map[:, 5:8] = torch.clamp_min(inner_colors + 0.5, 0.0)
+            inner_input_all_map[:, 12:15] = inner_input_all_map[:, 5:8]
+
+            inner_cova_cam_inv = torch.zeros(inner_means3D.shape[0], 6).cuda().float()
+            cova_cam_inv_all = torch.cat([cova_cam_inv, inner_cova_cam_inv], dim=0)
 
             input_all_map_all = torch.cat([input_all_map, inner_input_all_map], dim=0)
         else:
@@ -218,8 +236,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             scales_all = scales
             rotations_all = rotations
             input_all_map_all = input_all_map
+            cova_cam_inv_all = cova_cam_inv
 
-        rendered_image1, radii_all, observe_all, out, _ = rasterizer(
+        rendered_image1, radii_all, observe_all, out1, _ = rasterizer(
             means3D = means3D_all,
             means2D = means2D_all,
             means2D_abs = means2D_abs_all,
@@ -229,10 +248,13 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             scales = scales_all,
             rotations = rotations_all,
             all_map = input_all_map_all,
+            trans_ctol = cova_cam_inv_all,
             cov3D_precomp = cov3D_precomp)
+        
         
         only_inner = True
         if inner_gs is not None:
+            # rendered_image1 = out1[12:15,]
             if only_inner:
                 _, radii_inner, observe_inner, out, _ = rasterizer(
                     means3D = inner_means3D,
@@ -244,6 +266,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                     scales = inner_scales,
                     rotations = inner_rotations,
                     all_map = inner_input_all_map,
+                    trans_ctol = inner_cova_cam_inv,
                     cov3D_precomp = cov3D_precomp)
             
                 inner_radii = radii_inner
@@ -254,13 +277,11 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
         
             rendered_alpha1 = out[3, ] 
-            rendered_pbr = out[5:8, ] # [3, H, W]
+            rendered_inner_scattering = out[5:8, ] # [3, H, W]
             rendered_base_color = out_all_map[8:11, ]
             rendered_roughness  = out_all_map[11, ]
             rendered_diffuse    = out_all_map[12:15, ]
             rendered_normal_p   = out_all_map[15:18, ] # [3, H, W]
-            rendered_specular   = out_all_map[18:21, ]
-            rendered_opacity_in = out_all_map[21, ]
 
             # <start> 2025-2-25 测试延迟渲染
             fresnel = 0.04
@@ -282,7 +303,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             surf_color = light_colors * f_d
             specular = light_colors * f_s
 
-            pbr = specular + frac0.permute(2,0,1) * surf_color  + (1 - frac0.permute(2,0,1)) * rendered_pbr
+            pbr = specular + frac0.permute(2,0,1) * surf_color  + (1 - frac0.permute(2,0,1)) * rendered_inner_scattering
             # <end>
 
             return_dict.update(

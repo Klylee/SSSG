@@ -85,8 +85,46 @@ def chamfer_distance(points1: np.ndarray, points2: np.ndarray) -> float:
     nn_engine.fit(points2)
     dist_s2d, idx_s2d = nn_engine.kneighbors(points1, n_neighbors=1, return_distance=True) 
     mean_s2d = dist_s2d[dist_s2d < max_dist].mean()
-    return (mean_d2s + mean_s2d) / 2, mean_s2d, mean_d2s, dist_d2s
+    return (mean_d2s + mean_s2d) / 2, mean_s2d, mean_d2s, dist_d2s, dist_s2d
 
+def error_map(dist):
+    dist_degree = dist.squeeze() / 0.002
+    dist_degree = dist_degree.astype(int)
+    dist_degree = np.clip(dist_degree, a_min=0, a_max=4)
+    
+    palette = np.array([
+        [202, 243, 255],  # '#CAF3FFFF' 0.000 - 0.002
+        [109, 213, 233],  # '#6DD5E9FF' 0.002 - 0.004
+        [58, 154, 199],   # '#3A9AC7FF' 0.004 - 0.006
+        [30, 107, 146],   # '#1E6B92FF' 0.006 - 0.008
+        [20, 76, 102]     # '#144C66'   0.008 -
+    ], dtype=np.float32) / 255.0
+    colors = palette[dist_degree]
+    return colors
+
+def depth_filter(points, depth_map, cameras):
+    visibility = np.zeros(points.shape[0], dtype=bool)
+    for camera in tqdm(cameras, desc="Culling mesh given masks"):      
+        with torch.no_grad():
+            # transform and project
+            cam_points =  points @ camera.full_proj_transform
+            ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
+            point2d_x = (ndc_points[:, 0] + 1) * 0.5 * camera.image_width
+            point2d_y = (ndc_points[:, 1] + 1) * 0.5 * camera.image_height
+            point2d = torch.stack([point2d_x, point2d_y, cam_points[:, 2]], dim=-1)
+
+            in_image = (point2d[:, 0] >= 0) & (point2d[:, 0] < camera.image_width) & (point2d[:, 1] >= 0) & (point2d[:, 1] < camera.image_height)
+            point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
+            point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
+
+            image_id = int(camera.image_name.split('.')[0])
+            depth_map = depths[image_id]
+            depth = depth_map[point2d[:, 1].long(), point2d[:, 0].long()]
+            
+            valid = in_image & (point2d[:, 2] <= depth)
+            visibility |= valid.cpu().numpy()
+
+    return visibility
 
 if __name__ == '__main__':
     mp.freeze_support()
@@ -133,7 +171,7 @@ if __name__ == '__main__':
         reconstructed_mesh = trimesh.load_mesh(os.path.join(output_file, 'mesh', reconstructed_mesh_file))
 
         if mask_cull:
-             # load masks
+            # load masks
             train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
             test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
             train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
@@ -146,6 +184,8 @@ if __name__ == '__main__':
 
             sampled_masks = []
             
+            depths = np.load(f"/home/yuanyouwen/expdata/neuralto/depth/{args.s}.npy")
+            depths = torch.from_numpy(depths).cuda()
             visibility = np.ones(vertices.shape[0], dtype=bool)
             for i, camera in tqdm(enumerate(all_cameras),  desc="Culling mesh given masks"):      
                 with torch.no_grad():
@@ -154,14 +194,18 @@ if __name__ == '__main__':
                     ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
                     point2d_x = (ndc_points[:, 0] + 1) * 0.5 * camera.image_width
                     point2d_y = (ndc_points[:, 1] + 1) * 0.5 * camera.image_height
-                    point2d = torch.stack([point2d_x, point2d_y], dim=-1)
+                    point2d = torch.stack([point2d_x, point2d_y, cam_points[:, 2]], dim=-1)
 
                     in_image = (point2d[:, 0] >= 0) & (point2d[:, 0] < camera.image_width) & (point2d[:, 1] >= 0) & (point2d[:, 1] < camera.image_height)
                     point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
                     point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
+
+                    image_id = int(camera.image_name.split('.')[0])
+                    depth_map = depths[image_id]
+                    depth = depth_map[point2d[:, 1].long(), point2d[:, 0].long()]
                     
                     mask = binary_dilation((camera.mask).float(), 5).bool()
-                    valid = in_image & mask[point2d[:, 1].long(), point2d[:, 0].long()]
+                    valid = in_image & mask[point2d[:, 1].long(), point2d[:, 0].long()] & (point2d[:, 2] >= depth)
                     visibility &= valid.cpu().numpy()
 
                     point_valid = point2d[valid]
@@ -238,30 +282,48 @@ if __name__ == '__main__':
         )
         reconstructed_mesh.transform(reg3.transformation)
 
-
         reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
+
+
+
+        if False:
+            # load masks
+            train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
+            test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
+            train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
+            all_cameras = train_cameras
+            
+            recon_points = torch.from_numpy(np.asarray(reconstructed_pcd.points)).cuda()
+            recon_points = torch.cat((recon_points, torch.ones_like(recon_points[:, :1])), dim=-1).float()
+            gt_points = torch.from_numpy(np.asarray(gt_pcd.points)).cuda()
+            gt_points = torch.cat((gt_points, torch.ones_like(recon_points[:, :1])), dim=-1).float()
+
+            depths = np.load(f"/home/yuanyouwen/expdata/neuralto/depth/{args.s}.npy")
+            depths = torch.from_numpy(depths).cuda()
+            
+            visibility = depth_filter(recon_points, depths, all_cameras)
+            reconstructed_pcd.points = o3d.utility.Vector3dVector(np.asarray(reconstructed_pcd.points)[visibility])
+            visibility = depth_filter(gt_points, depths, all_cameras)
+            gt_pcd.points = o3d.utility.Vector3dVector(np.asarray(gt_pcd.points)[visibility])
+
+        
         o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'rec.ply'), reconstructed_pcd)
         o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'gt.ply'), gt_pcd)
 
-        cd, cd1, cd2, dist_rg = chamfer_distance(np.asarray(gt_pcd.points), np.asarray(reconstructed_pcd.points))
+        cd, cd1, cd2, dist_rg, dist_gr = chamfer_distance(np.asarray(gt_pcd.points), np.asarray(reconstructed_pcd.points))
         print(f"Chamfer distance: {cd}\n \
                  {cd1}\n \
                  {cd2}")
 
-        dist_degree = dist_rg.squeeze() / 0.002
-        dist_degree = dist_degree.astype(int)
-        dist_degree = np.clip(dist_degree, a_min=0, a_max=4)
-        
-        palette = np.array([
-            [202, 243, 255],  # '#CAF3FFFF' 0.000 - 0.002
-            [109, 213, 233],  # '#6DD5E9FF' 0.002 - 0.004
-            [58, 154, 199],   # '#3A9AC7FF' 0.004 - 0.006
-            [30, 107, 146],   # '#1E6B92FF' 0.006 - 0.008
-            [20, 76, 102]     # '#144C66'   0.008 -
-        ], dtype=np.float32) / 255.0
-        colors = palette[dist_degree]
+        colors_rg = error_map(dist_rg)
+        colors_gr = error_map(dist_gr)
         
         colored_pcd = o3d.geometry.PointCloud()
         colored_pcd.points = o3d.utility.Vector3dVector(reconstructed_pcd.points)
-        colored_pcd.colors = o3d.utility.Vector3dVector(colors)
-        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', f"colored-{args.s}.ply"), colored_pcd)
+        colored_pcd.colors = o3d.utility.Vector3dVector(colors_rg)
+        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', f"colored-{args.s}-rg.ply"), colored_pcd)
+
+        colored_pcd = o3d.geometry.PointCloud()
+        colored_pcd.points = o3d.utility.Vector3dVector(gt_pcd.points)
+        colored_pcd.colors = o3d.utility.Vector3dVector(colors_gr)
+        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', f"colored-{args.s}-gr.ply"), colored_pcd)

@@ -25,9 +25,8 @@ from scene.direct_light_map import DirectLightMap
 import numpy as np
 import cv2
 import open3d as o3d
-from scene.app_model import AppModel
 import copy
-from collections import deque
+from utils.system_utils import searchForMaxIteration
 
 def clean_mesh(mesh, min_len=1000):
     with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
@@ -41,9 +40,10 @@ def clean_mesh(mesh, min_len=1000):
     return mesh_0
 
 def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, background, 
-               app_model=None, max_depth=5.0, volume=None, use_depth_filter=False, env_light_map=None):
+               app_model=None, max_depth=5.0, volume=None, use_depth_filter=False, inner_gs = None, env_light_map=None):
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
+    render_pbr_path = os.path.join(model_path, name, "ours_{}".format(iteration), "pbrs")
     render_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_depth")
     render_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_normal")
 
@@ -51,14 +51,17 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
     makedirs(render_path, exist_ok=True)
     makedirs(render_depth_path, exist_ok=True)
     makedirs(render_normal_path, exist_ok=True)
+    makedirs(render_pbr_path, exist_ok=True)
 
     gaussians.update_visibility(64)
 
     depths_tsdf_fusion = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         gt, _ = view.get_image()
-        out = render(view, gaussians, pipeline, background, app_model=app_model, return_pbr=True, direct_light=env_light_map)
-        rendering = out["render"].clamp(0.0, 1.0)
+        out = render(view, gaussians, pipeline, background, app_model=app_model, return_pbr=True, inner_gs=inner_gs, direct_light=env_light_map)
+        rendering = out["render1"].clamp(0.0, 1.0)
+        rendered_pbr = out["pbr"]
+
         _, H, W = rendering.shape
 
         # mask = view.mask.
@@ -67,10 +70,11 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         depth_tsdf = depth.clone() * alpha
         depth = depth.detach().cpu().numpy()
         depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
+        # print(f"{depth.min()} {depth.max()}")
         depth_i = (depth_i * 255).clip(0, 255).astype(np.uint8)
         depth_color = cv2.applyColorMap(depth_i, cv2.COLORMAP_JET)
 
-        normal = out["rendered_normal"].permute(1,2,0)
+        normal = out["depth_normal"].permute(1,2,0)
         normal = normal/(normal.norm(dim=-1, keepdim=True)+1.0e-8)
         normal = normal.detach().cpu().numpy()
         normal = ((normal+1) * 127.5).astype(np.uint8).clip(0, 255)
@@ -78,9 +82,11 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         if name == 'test':
             torchvision.utils.save_image(gt.clamp(0.0, 1.0), os.path.join(gts_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name + ".png"))
+            torchvision.utils.save_image(rendered_pbr, os.path.join(render_pbr_path, view.image_name + ".png"))
         else:
-            rendering_np = (rendering.permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
-            cv2.imwrite(os.path.join(render_path, view.image_name + ".jpg"), rendering_np)
+            torchvision.utils.save_image(gt.clamp(0.0, 1.0), os.path.join(gts_path, view.image_name + ".png"))
+            torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name + ".png"))
+            torchvision.utils.save_image(rendered_pbr, os.path.join(render_pbr_path, view.image_name + ".png"))
         cv2.imwrite(os.path.join(render_depth_path, view.image_name + ".jpg"), depth_color)
         cv2.imwrite(os.path.join(render_normal_path, view.image_name + ".jpg"), normal)
 
@@ -155,7 +161,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
             pose = np.identity(4)
             pose[:3,:3] = view.R.transpose(-1,-2)
             pose[:3, 3] = view.T
-            color = o3d.io.read_image(os.path.join(render_path, view.image_name + ".jpg"))
+            color = o3d.io.read_image(os.path.join(render_path, view.image_name + ".png"))
             depth = o3d.geometry.Image((ref_depth*1000).astype(np.uint16))
             rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                 color, depth, depth_scale=1000.0, depth_trunc=max_depth, convert_rgb_to_intensity=False)
@@ -168,13 +174,20 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
                  max_depth : float, voxel_size : float, use_depth_filter : bool):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        direct_env_light = DirectLightMap()
+        inner_gaussians = GaussianModel(dataset.sh_degree)
+        scene = Scene(dataset, gaussians, inner_gaussians, load_iteration=iteration, shuffle=False)
+        direct_light = DirectLightMap()
 
-        # app_model = AppModel()
-        # app_model.load_weights(scene.model_path)
-        # app_model.eval()
-        # app_model.cuda()
+        if iteration == -1:
+            iteration = searchForMaxIteration(os.path.join(dataset.model_path, 'point_cloud'))
+        checkpoint = f"./output_neuralto/{dataset.model_path.split('/')[-2]}/test/chkpnt{iteration}.pth"
+
+        if os.path.exists(checkpoint.replace('chkpnt', 'inner_chkpnt')):
+            (model_params, first_iter) = torch.load(checkpoint.replace('chkpnt', 'inner_chkpnt'))
+            inner_gaussians.restore(model_params)
+        if gaussians.use_pbr and os.path.exists(checkpoint.replace('chkpnt', 'env_light')):
+            direct_light.create_from_ckpt(checkpoint.replace('chkpnt', 'env_light'))
+
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -186,7 +199,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
 
         if not skip_train:
             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), scene, gaussians, pipeline, background, 
-                       max_depth=max_depth, volume=volume, use_depth_filter=use_depth_filter, env_light_map=direct_env_light)
+                       max_depth=max_depth, volume=volume, use_depth_filter=use_depth_filter, inner_gs=inner_gaussians, env_light_map=direct_light)
             print(f"extract_triangle_mesh")
             mesh = volume.extract_triangle_mesh()
 
@@ -202,7 +215,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
                                        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
 
         if not skip_test:
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background, env_light_map=direct_env_light)
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background, inner_gs=inner_gaussians, env_light_map=direct_light)
 
 if __name__ == "__main__":
     torch.set_num_threads(8)
@@ -224,6 +237,9 @@ if __name__ == "__main__":
     args.skip_test = False
     args.eval = True
     args.use_depth_filter = True
+
+    args.resolution = 1
+    args.ncc_scale = 1
 
     # args.iteration = 80000
     # Initialize system state (RNG)

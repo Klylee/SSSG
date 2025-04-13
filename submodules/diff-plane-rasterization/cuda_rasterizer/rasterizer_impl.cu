@@ -212,6 +212,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float *rotations,
 	const float *cov3D_precomp,
 	const float *all_map,
+	const float *conv_cam_inv,
 	const float *viewmatrix,
 	const float *projmatrix,
 	const float *cam_pos,
@@ -340,6 +341,7 @@ int CudaRasterizer::Rasterizer::forward(
 				   geomState.means3D_view,
 				   feature_ptr,
 				   all_map,
+				   conv_cam_inv,
 				   geomState.conic_opacity,
 				   imgState.accum_alpha,
 				   imgState.n_contrib,
@@ -369,6 +371,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const float *scales,
 	const float scale_modifier,
 	const float *rotations,
+	const float *cova_cam_inv,
 	const float *cov3D_precomp,
 	const float *viewmatrix,
 	const float *projmatrix,
@@ -393,6 +396,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float *dL_dscale,
 	float *dL_drot,
 	float *dL_dall_map,
+	float *dL_dcova_cam_inv,
 	const bool render_geo,
 	bool debug)
 {
@@ -430,6 +434,7 @@ void CudaRasterizer::Rasterizer::backward(
 				   all_maps,		   // input all_map
 				   all_map_pixels,	   // out_all_map
 				   plane_depth_pixels, // out_plane_depth
+				   cova_cam_inv,
 				   imgState.accum_alpha,
 				   imgState.n_contrib,
 				   dL_dpix,
@@ -442,6 +447,7 @@ void CudaRasterizer::Rasterizer::backward(
 				   dL_dopacity,
 				   dL_dcolor,
 				   dL_dall_map,
+				   dL_dcova_cam_inv,
 				   render_geo),
 			   debug)
 

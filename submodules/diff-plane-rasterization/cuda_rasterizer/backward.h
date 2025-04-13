@@ -34,6 +34,7 @@ namespace BACKWARD
 		const float *all_maps,
 		const float *all_map_pixels,
 		const float *plane_depth_pixels,
+		const float *cova_cam_inv,
 		const float *final_Ts,
 		const uint32_t *n_contrib,
 		const float *dL_dpixels,
@@ -46,6 +47,7 @@ namespace BACKWARD
 		float *dL_dopacity,
 		float *dL_dcolors,
 		float *dL_dall_map,
+		float *dL_dcova_cam_inv,
 		const bool render_geo);
 
 	void preprocess(

@@ -63,6 +63,7 @@ namespace FORWARD
 		const float3 *means3D_view,
 		const float *features,
 		const float *all_map,
+		const float *conv_cam_inv,
 		const float4 *conic_opacity,
 		float *final_T,
 		uint32_t *n_contrib,

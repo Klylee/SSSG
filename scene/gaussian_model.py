@@ -136,7 +136,7 @@ class GaussianModel:
             ])
         return captured
     
-    def restore(self, model_args, training_args):
+    def restore(self, model_args, training_args = None):
         (self.active_sh_degree, 
         self._xyz, 
         self._knn_f,
@@ -165,12 +165,13 @@ class GaussianModel:
              self._visibility_dc,
              self._visibility_rest) = model_args[16:]
         
-        self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
-        self.denom = denom
-        self.denom_abs = denom_abs
-        self.optimizer.load_state_dict(opt_dict)
+        if training_args != None:
+            self.training_setup(training_args)
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
+            self.denom = denom
+            self.denom_abs = denom_abs
+            self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):
@@ -1153,9 +1154,13 @@ class GaussianModel:
 
         return num_gs
 
-    def add_noise(self, xyz_lr):
+    def add_noise(self, xyz_lr, surf=True):
         with torch.no_grad():
-            L = build_scaling_rotation(self.get_scaling, self.get_rotation)
+            scale = self.get_scaling
+            if surf:
+                min_scale = torch.min(scale)
+                scale[scale == min_scale] = 0.1
+            L = build_scaling_rotation(scale, self.get_rotation)
             actual_covariance = L @ L.transpose(1, 2)
 
             def op_sigmoid(x, k=100, x0=0.995):

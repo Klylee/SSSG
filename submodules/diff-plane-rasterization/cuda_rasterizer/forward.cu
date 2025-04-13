@@ -285,6 +285,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		const float3 *__restrict__ means3D_view,
 		const float *__restrict__ features,
 		const float *__restrict__ all_map,
+		const float *__restrict__ conv_cam_inv,
 		const float4 *__restrict__ conic_opacity,
 		float *__restrict__ final_T,
 		uint32_t *__restrict__ n_contrib,
@@ -329,6 +330,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	float C[CHANNELS] = {0};
 	float All_map[ALL_MAP_CHANNELS] = {0};
 	float plane_depth = 0;
+	float avg_depth = 0;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -364,7 +366,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			if (power > 0.0f)
 				continue;
 
-			// float3 mean3D_view = collected_means3D_view[j];
+			float3 mean3D_view = collected_means3D_view[j];
 			// float depth_test = (ray.x * mean3D_view.x + ray.y * mean3D_view.y + mean3D_view.z) / (ray.x * ray.x + ray.y * ray.y + 1);
 
 			// Eq. (2) from 3D Gaussian splatting paper.
@@ -390,6 +392,13 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 				for (int ch = 0; ch < ALL_MAP_CHANNELS; ch++)
 					All_map[ch] += all_map[collected_id[j] * ALL_MAP_CHANNELS + ch] * alpha * T;
 				// plane_depth += depth_test * alpha * T;
+
+				float k1 = ray.x * conv_cam_inv[collected_id[j] * 6 + 0] + ray.y * conv_cam_inv[collected_id[j] * 6 + 1] + conv_cam_inv[collected_id[j] * 6 + 2];
+				float k2 = ray.x * conv_cam_inv[collected_id[j] * 6 + 1] + ray.y * conv_cam_inv[collected_id[j] * 6 + 3] + conv_cam_inv[collected_id[j] * 6 + 4];
+				float k3 = ray.x * conv_cam_inv[collected_id[j] * 6 + 2] + ray.y * conv_cam_inv[collected_id[j] * 6 + 4] + conv_cam_inv[collected_id[j] * 6 + 5];
+				float t1 = k1 * mean3D_view.x + k2 * mean3D_view.y + k3 * mean3D_view.z;
+				float t2 = k1 * ray.x + k2 * ray.y + k3;
+				avg_depth += t1 / (t2 + 1.0e-8) * alpha * T;
 			}
 
 			if (T > 0.5)
@@ -416,8 +425,8 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		{
 			for (int ch = 0; ch < ALL_MAP_CHANNELS; ch++)
 				out_all_map[ch * H * W + pix_id] = All_map[ch];
-			out_plane_depth[pix_id] = All_map[4] / -(All_map[0] * ray.x + All_map[1] * ray.y + All_map[2] + 1.0e-8);
-			// out_plane_depth[pix_id] = plane_depth;
+			// out_plane_depth[pix_id] = All_map[4] / -(All_map[0] * ray.x + All_map[1] * ray.y + All_map[2] + 1.0e-8);
+			out_plane_depth[pix_id] = avg_depth;
 		}
 	}
 }
@@ -435,6 +444,7 @@ void FORWARD::render(
 	const float3 *means3D_view,
 	const float *colors,
 	const float *all_map,
+	const float *conv_cam_inv,
 	const float4 *conic_opacity,
 	float *final_T,
 	uint32_t *n_contrib,
@@ -457,6 +467,7 @@ void FORWARD::render(
 		means3D_view,
 		colors,
 		all_map,
+		conv_cam_inv,
 		conic_opacity,
 		final_T,
 		n_contrib,

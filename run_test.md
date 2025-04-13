@@ -6,4 +6,6 @@ python render.py -m output_neuralto/chinesedragon/test --max_depth 10.0 --voxel_
 
 python scripts/dtu_eval.py
 
+python metrics.py -m output_neuralto/chinesedragon/test
+
 CUDA_VISIBLE_DEVICES=1

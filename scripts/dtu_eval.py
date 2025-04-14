@@ -87,6 +87,29 @@ def chamfer_distance(points1: np.ndarray, points2: np.ndarray) -> float:
     mean_s2d = dist_s2d[dist_s2d < max_dist].mean()
     return (mean_d2s + mean_s2d) / 2, mean_s2d, mean_d2s, dist_d2s
 
+def depth_filter(points, depth_map, cameras):
+    visibility = np.zeros(points.shape[0], dtype=bool)
+    for camera in tqdm(cameras, desc="Culling mesh given masks"):      
+        with torch.no_grad():
+            # transform and project
+            cam_points =  points @ camera.full_proj_transform
+            ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
+            point2d_x = (ndc_points[:, 0] + 1) * 0.5 * camera.image_width
+            point2d_y = (ndc_points[:, 1] + 1) * 0.5 * camera.image_height
+            point2d = torch.stack([point2d_x, point2d_y, cam_points[:, 2]], dim=-1)
+
+            in_image = (point2d[:, 0] >= 0) & (point2d[:, 0] < camera.image_width) & (point2d[:, 1] >= 0) & (point2d[:, 1] < camera.image_height)
+            point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
+            point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
+
+            image_id = int(camera.image_name.split('.')[0])
+            depth_map = depths[image_id]
+            depth = depth_map[point2d[:, 1].long(), point2d[:, 0].long()]
+            
+            valid = in_image & (point2d[:, 2] <= depth)
+            visibility |= valid.cpu().numpy()
+
+    return visibility
 
 if __name__ == '__main__':
     mp.freeze_support()
@@ -237,6 +260,7 @@ if __name__ == '__main__':
             o3d.pipelines.registration.ICPConvergenceCriteria(1e-6, 50),
         )
         reconstructed_mesh.transform(reg3.transformation)
+        reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
 
         if True:
             # load masks
@@ -258,7 +282,6 @@ if __name__ == '__main__':
             visibility = depth_filter(gt_points, depths, all_cameras)
             gt_pcd.points = o3d.utility.Vector3dVector(np.asarray(gt_pcd.points)[visibility])
 
-        reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
         o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'rec.ply'), reconstructed_pcd)
         o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'gt.ply'), gt_pcd)
 

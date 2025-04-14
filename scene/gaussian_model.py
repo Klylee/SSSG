@@ -136,7 +136,7 @@ class GaussianModel:
             ])
         return captured
     
-    def restore(self, model_args, training_args):
+    def restore(self, model_args, training_args = None):
         (self.active_sh_degree, 
         self._xyz, 
         self._knn_f,
@@ -165,12 +165,13 @@ class GaussianModel:
              self._visibility_dc,
              self._visibility_rest) = model_args[16:]
         
-        self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
-        self.denom = denom
-        self.denom_abs = denom_abs
-        self.optimizer.load_state_dict(opt_dict)
+        if training_args != None:
+            self.training_setup(training_args)
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
+            self.denom = denom
+            self.denom_abs = denom_abs
+            self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):

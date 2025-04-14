@@ -104,7 +104,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.cuda()
     
     scene_name = dataset.model_path.split('/')[-2]
-    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt30000.pth"
+    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt50000.pth"
     if checkpoint and os.path.exists(checkpoint):
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -507,7 +507,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration < opt.densify_until_iter and iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     dead_mask = (gaussians.get_opacity <= 0.005).squeeze(-1)
                     gaussians.relocate_gs(dead_mask=dead_mask)
-                    gaussians.add_new_gs(cap_max=150000)
+                    gaussians.add_new_gs(cap_max=200000)
 
                     if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
                         dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)

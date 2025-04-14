@@ -238,6 +238,25 @@ if __name__ == '__main__':
         )
         reconstructed_mesh.transform(reg3.transformation)
 
+        if True:
+            # load masks
+            train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
+            test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
+            train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
+            all_cameras = train_cameras
+            
+            recon_points = torch.from_numpy(np.asarray(reconstructed_pcd.points)).cuda()
+            recon_points = torch.cat((recon_points, torch.ones_like(recon_points[:, :1])), dim=-1).float()
+            gt_points = torch.from_numpy(np.asarray(gt_pcd.points)).cuda()
+            gt_points = torch.cat((gt_points, torch.ones_like(recon_points[:, :1])), dim=-1).float()
+
+            depths = np.load(f"/home/yuanyouwen/expdata/neuralto/depth/{args.s}.npy")
+            depths = torch.from_numpy(depths).cuda()
+            
+            visibility = depth_filter(recon_points, depths, all_cameras)
+            reconstructed_pcd.points = o3d.utility.Vector3dVector(np.asarray(reconstructed_pcd.points)[visibility])
+            visibility = depth_filter(gt_points, depths, all_cameras)
+            gt_pcd.points = o3d.utility.Vector3dVector(np.asarray(gt_pcd.points)[visibility])
 
         reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
         o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'rec.ply'), reconstructed_pcd)

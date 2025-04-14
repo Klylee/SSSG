@@ -86,7 +86,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     cmd = f'cp -rf ./utils {dataset.model_path}/'
     os.system(cmd)
     
-    # os.system(f'rm -rf {dataset.model_path}/debug')
+    os.system(f'rm -rf {dataset.model_path}/debug')
     # os.system(f'rm -rf {dataset.model_path}/app_model')
 
     gaussians = GaussianModel(dataset.sh_degree)
@@ -139,8 +139,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.update_visibility(pipe.sample_num)
 
     use_inner_gs = True
-    inner_gs_start = 1000
+    inner_gs_start = 3000
     ratio = 1.0
+    reset_opacity_until_iter = opt.densify_until_iter
 
     camera = scene.getTrainCameras()[0]
     print(f'{camera.resolution} {camera.ncc_scale}')
@@ -270,7 +271,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 weight = 1.3
                 # if iteration > 65000:
                 #     weight = 1.7
-                if iteration > opt.single_view_weight_from_iter + 2000:
+                if iteration > opt.single_view_weight_from_iter + inner_gs_start + 2000:
                     loss += weight * loss_pbr
                     loss += 0.01 * loss_base_color_smooth
                     loss += 0.01 * loss_roughness_smooth
@@ -480,7 +481,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.prune_points(prune_mask)
 
                 # reset_opacity
-                if iteration < 39000:
+                if iteration < reset_opacity_until_iter:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
                         if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:

@@ -111,9 +111,9 @@ if __name__ == '__main__':
     gt_mesh_file = f'/home/yuanyouwen/expdata/neuralto/gt_mesh/{args.s}.obj'
     # gt_mesh_file = '/home/yuanyouwen/Experiments/PGSR_my/chinesedragon.obj'
 
-    reconstructed_mesh_file = 'tsdf_fusion_post.obj'
+    # reconstructed_mesh_file = 'tsdf_fusion_post.obj'
     # reconstructed_mesh_file = 'tsdf_fusion_post-pgsr2.obj'
-    # reconstructed_mesh_file = 'chinesedragon_without_ncc_loss.ply'
+    reconstructed_mesh_file = 'dragon_5k.ply'
     # reconstructed_mesh_file = '00080000.ply'
 
     # reconstructed_mesh_file = 'filtered_mesh_pgsr.obj'

@@ -72,8 +72,10 @@ def gen_virtul_cam(cam, trans_noise=1.0, deg_noise=15.0):
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
 
-    if not os.path.exists(f'{dataset.model_path}'):
-        os.makedirs(f'{dataset.model_path}')
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+    
     # backup main code
     cmd = f'cp ./train.py {dataset.model_path}/'
     os.system(cmd)
@@ -104,7 +106,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.cuda()
     
     scene_name = dataset.model_path.split('/')[-2]
-    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt50000.pth"
+    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt30000.pth"
     if checkpoint and os.path.exists(checkpoint):
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -139,17 +141,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.update_visibility(pipe.sample_num)
 
     use_inner_gs = True
-    inner_gs_start = 3000
+    inner_gs_start = 1000
     ratio = 1.0
-    reset_opacity_until_iter = opt.densify_until_iter
+    opt.multi_view_weight_from_iter = 75000
+    opt.densify_until_iter = 60000
+    reset_opacity_until_iter = 60000
 
     camera = scene.getTrainCameras()[0]
     print(f'{camera.resolution} {camera.ncc_scale}')
 
     use_density_prune = True
     for iteration in range(first_iter, opt.iterations + 1):
-        if iteration > 60000:
-            use_density_prune = False
+        # if iteration > 60000:
+        #     use_density_prune = False
         
         iter_start.record()
         xyz_lr = gaussians.update_learning_rate(iteration)
@@ -170,8 +174,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
         
-        if iteration > opt.single_view_weight_from_iter and gaussians.get_xyz.shape[0] != 0 and gaussians.get_xyz.shape[0] != gaussians._incident_dirs.shape[0]:
-            gaussians.update_visibility(pipe.sample_num)
+        # if iteration > opt.single_view_weight_from_iter and gaussians.get_xyz.shape[0] != 0 and gaussians.get_xyz.shape[0] != gaussians._incident_dirs.shape[0]:
+        #     gaussians.update_visibility(pipe.sample_num)
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, app_model=app_model,
@@ -192,15 +196,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1 = l1_loss(image, gt_image)
         image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
 
-        # if iteration < opt.single_view_weight_from_iter + 600:
-        #     loss = image_loss.clone()
-        # else:
-        #     loss = 0.0
         loss = image_loss.clone()
 
         # <start> 2025-03-12
         # restrain the inner_gs to the inner part of the model
-        if use_inner_gs and use_density_prune == False:
+        # if use_inner_gs and use_density_prune == False:
+        if False and use_inner_gs and iteration > 50000:
             inner_gs_points = torch.cat([inner_gaussians.get_xyz, torch.ones([inner_gaussians.get_xyz.shape[0], 1], device="cuda")], dim=-1)
             cam_points =  inner_gs_points @ viewpoint_cam.full_proj_transform
             ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
@@ -217,12 +218,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             inner_opacity = inner_gaussians.get_opacity
             inner_opacity = inner_opacity[in_image]
             inner_opacity = inner_opacity[depth_diff > 0 - 0.00001]
-            inner_restrain_loss = 0.1 * inner_opacity.mean()
+            inner_restrain_loss = 0.01 * depth_diff[depth_diff > 0 - 0.00001].mean()
             loss += inner_restrain_loss
 
-            ratio = inner_opacity.shape[0] / inner_gaussians.get_opacity.shape[0]
+            # ratio = inner_opacity.shape[0] / inner_gaussians.get_opacity.shape[0]
         # <end>
-        
+        # ratio = (inner_gaussians.get_sign < 0).sum() / inner_gaussians.get_sign.shape[0]
         
 
         # scale loss
@@ -258,7 +259,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 rendered_pbr = render_pkg["pbr"]
                 rendered_base_color = render_pkg["base_color"]
                 rendered_roughness = render_pkg["roughness"]
-                rendered_diffuse = render_pkg["diffuse"]
+                rendered_scatter = render_pkg["scatter"]
                 rendered_specular = render_pkg["specular"]
 
                 Ll1_pbr = F.l1_loss(rendered_pbr, gt_image)
@@ -268,10 +269,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 loss_base_color_smooth = first_order_edge_aware_loss(rendered_base_color * mask, gt_image)
                 loss_roughness_smooth = first_order_edge_aware_loss(rendered_roughness.unsqueeze(0) * mask, gt_image)
 
-                weight = 1.3
-                # if iteration > 65000:
-                #     weight = 1.7
-                if iteration > opt.single_view_weight_from_iter + inner_gs_start + 2000:
+                weight = 1.1
+                if iteration > opt.single_view_weight_from_iter + inner_gs_start + 1000:
                     loss += weight * loss_pbr
                     loss += 0.01 * loss_base_color_smooth
                     loss += 0.01 * loss_roughness_smooth
@@ -323,61 +322,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if d_mask.sum() > 0:
                     geo_loss = geo_weight * ((weights * pixel_noise)[d_mask]).mean()
                     loss += geo_loss
-                    # if use_virtul_cam is False:
-                    #     with torch.no_grad():
-                    #         ## sample mask
-                    #         d_mask = d_mask.reshape(-1)
-                    #         valid_indices = torch.arange(d_mask.shape[0], device=d_mask.device)[d_mask]
-                    #         if d_mask.sum() > sample_num:
-                    #             index = np.random.choice(d_mask.sum().cpu().numpy(), sample_num, replace = False)
-                    #             valid_indices = valid_indices[index]
-
-                    #         weights = weights.reshape(-1)[valid_indices]
-                    #         ## sample ref frame patch
-                    #         pixels = pixels.reshape(-1,2)[valid_indices]
-                    #         offsets = patch_offsets(patch_size, pixels.device)
-                    #         ori_pixels_patch = pixels.reshape(-1, 1, 2) / viewpoint_cam.ncc_scale + offsets.float()
-                            
-                    #         H, W = gt_image_gray.squeeze().shape
-                    #         pixels_patch = ori_pixels_patch.clone()
-                    #         pixels_patch[:, :, 0] = 2 * pixels_patch[:, :, 0] / (W - 1) - 1.0
-                    #         pixels_patch[:, :, 1] = 2 * pixels_patch[:, :, 1] / (H - 1) - 1.0
-                    #         ref_gray_val = F.grid_sample(gt_image_gray.unsqueeze(1), pixels_patch.view(1, -1, 1, 2), align_corners=True)
-                    #         ref_gray_val = ref_gray_val.reshape(-1, total_patch_size)
-
-                    #         ref_to_neareast_r = nearest_cam.world_view_transform[:3,:3].transpose(-1,-2) @ viewpoint_cam.world_view_transform[:3,:3]
-                    #         ref_to_neareast_t = -ref_to_neareast_r @ viewpoint_cam.world_view_transform[3,:3] + nearest_cam.world_view_transform[3,:3]
-
-                    #     ## compute Homography
-                    #     ref_local_n = render_pkg["rendered_normal"].permute(1,2,0)
-                    #     ref_local_n = ref_local_n.reshape(-1,3)[valid_indices]
-
-                    #     ref_local_d = render_pkg['rendered_distance'].squeeze()
-
-                    #     ref_local_d = ref_local_d.reshape(-1)[valid_indices]
-                    #     H_ref_to_neareast = ref_to_neareast_r[None] - \
-                    #         torch.matmul(ref_to_neareast_t[None,:,None].expand(ref_local_d.shape[0],3,1), 
-                    #                     ref_local_n[:,:,None].expand(ref_local_d.shape[0],3,1).permute(0, 2, 1))/ref_local_d[...,None,None]
-                    #     H_ref_to_neareast = torch.matmul(nearest_cam.get_k(nearest_cam.ncc_scale)[None].expand(ref_local_d.shape[0], 3, 3), H_ref_to_neareast)
-                    #     H_ref_to_neareast = H_ref_to_neareast @ viewpoint_cam.get_inv_k(viewpoint_cam.ncc_scale)
-                        
-                    #     ## compute neareast frame patch
-                    #     grid = patch_warp(H_ref_to_neareast.reshape(-1,3,3), ori_pixels_patch)
-                    #     grid[:, :, 0] = 2 * grid[:, :, 0] / (W - 1) - 1.0
-                    #     grid[:, :, 1] = 2 * grid[:, :, 1] / (H - 1) - 1.0
-                    #     _, nearest_image_gray = nearest_cam.get_image()
-                    #     sampled_gray_val = F.grid_sample(nearest_image_gray[None], grid.reshape(1, -1, 1, 2), align_corners=True)
-                    #     sampled_gray_val = sampled_gray_val.reshape(-1, total_patch_size)
-                        
-                    #     ## compute loss
-                    #     ncc, ncc_mask = lncc(ref_gray_val, sampled_gray_val)
-                    #     mask = ncc_mask.reshape(-1)
-                    #     ncc = ncc.reshape(-1) * weights
-                    #     ncc = ncc[mask].squeeze()
-
-                    #     if mask.sum() > 0:
-                    #         ncc_loss = ncc_weight * ncc.mean()
-                            # loss += ncc_loss
 
         loss.backward()
         iter_end.record()
@@ -397,7 +341,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #     d_mask_show = (weights.float()*255).detach().cpu().numpy().astype(np.uint8).reshape(H,W)
                 #     d_mask_show_color = cv2.applyColorMap(d_mask_show, cv2.COLORMAP_JET)
                 # else:
-                d_mask_show_color = np.zeros_like(gt_img_show).astype(np.uint8)
+                # d_mask_show_color = np.zeros_like(gt_img_show).astype(np.uint8)
                 
                 depth = render_pkg['plane_depth'].squeeze().detach().cpu().numpy()
                 depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
@@ -412,11 +356,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 image_weight_color = cv2.applyColorMap(image_weight, cv2.COLORMAP_JET)
                 specular_show = ((rendered_specular).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
                 pbr_show = ((rendered_pbr).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+                scatter_show = ((rendered_scatter).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
                 alpha_show = (render_pkg["alpha"].repeat(3,1,1).permute(1,2,0).clamp(0,1) * 255).detach().cpu().numpy().astype(np.uint8)
                 row0 = np.concatenate([gt_img_show, img_show, normal_show, distance_color, specular_show], axis=1)
-                row1 = np.concatenate([alpha_show, depth_color, depth_normal_show, image_weight_color, pbr_show], axis=1)
+                row1 = np.concatenate([alpha_show, depth_color, depth_normal_show, scatter_show, pbr_show], axis=1)
                 image_to_show = np.concatenate([row0, row1], axis=0)
                 cv2.imwrite(os.path.join(debug_path, "%05d"%iteration + "_" + viewpoint_cam.image_name + ".jpg"), image_to_show)
+            
+            
+            # if iteration < opt.single_view_weight_from_iter and iteration % 500 == 0:
+            #     gt_img_show = ((gt_image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+            #     img_show = ((image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+            #     res = np.concatenate([gt_img_show, img_show], axis=1)
+            #     cv2.imwrite(os.path.join(debug_path, "%05d"%iteration + "_" + viewpoint_cam.image_name + ".jpg"), res)
 
             # Progress bar
             ema_loss_for_log = 0.4 * image_loss.item() + 0.6 * ema_loss_for_log
@@ -462,9 +414,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
                         
                         # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-                        #     dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)
+                        #     dead_mask = ((inner_gaussians.get_opacity).abs() <= 0.005).squeeze(-1)
                         #     inner_gaussians.relocate_gs(dead_mask=dead_mask)
-                        #     inner_gaussians.add_new_gs(cap_max=-1)
+                        #     inner_gaussians.add_new_gs(cap_max=20000)
+
                         if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
                             inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
             
@@ -498,16 +451,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         inner_gaussians.optimizer.step()
                         inner_gaussians.optimizer.zero_grad(set_to_none = True)
 
-                        # inner_gaussians.add_noise(xyz_lr)
+                        inner_gaussians.add_noise(xyz_lr)
 
                     if gaussians.use_pbr:
                         direct_light.step()
 
             else:
                 if iteration < opt.densify_until_iter and iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    dead_mask = (gaussians.get_opacity <= 0.005).squeeze(-1)
+                    dead_mask = (gaussians.get_opacity.abs() <= 0.005).squeeze(-1)
                     gaussians.relocate_gs(dead_mask=dead_mask)
-                    gaussians.add_new_gs(cap_max=200000)
+                    gaussians.add_new_gs(cap_max=100000)
 
                     if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
                         dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)
@@ -533,12 +486,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     
             # <end>
 
+            # if iteration % 100 == 0:
+            #     with open('./debug/point_num.txt', '+a') as f:
+            #         ratio = (inner_gaussians.get_opacity < 0).sum() / inner_gaussians.get_xyz.shape[0] + 1e-8 
+            #         f.write(f"{gaussians.get_xyz.shape[0]}, {inner_gaussians.get_xyz.shape[0]}, {ratio}\n")
+            
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 app_model.save_weights(scene.model_path, iteration)
                 torch.save((direct_light.capture(), iteration), scene.model_path + '/env_light' + str(iteration) + '.pth')
                 torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
+            # if iteration == 33000:
+            #     torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
     
     app_model.save_weights(scene.model_path, opt.iterations)
     torch.cuda.empty_cache()

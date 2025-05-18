@@ -371,8 +371,8 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
 			// Avoid numerical instabilities (see paper appendix).
-			float alpha = min(0.99f, con_o.w * exp(power));
-			if (alpha < 1.0f / 255.0f)
+			float alpha = max(-0.99f, min(0.99f, con_o.w * exp(power)));
+			if (alpha < 1.0f / 255.0f && alpha > -1.0f / 255.0f)
 				continue;
 			float test_T = T * (1 - alpha);
 			if (test_T < 0.0001f)

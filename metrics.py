@@ -54,6 +54,9 @@ def evaluate(model_paths):
             for method in os.listdir(test_dir):
                 print("Method:", method)
 
+                if method != "ours_100000":
+                    continue
+
                 full_dict[scene_dir][method] = {}
                 per_view_dict[scene_dir][method] = {}
                 full_dict_polytopeonly[scene_dir][method] = {}

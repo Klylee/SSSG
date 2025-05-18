@@ -20,6 +20,12 @@ def erode(bin_img, ksize=12):
 
 def process_image(image_path, resolution, ncc_scale):
     image = Image.open(image_path)
+    if image.mode == 'RGBA':
+        background = Image.new('RGB', image.size, (0, 0, 0))
+        alpha = image.split()[-1]
+        image = Image.merge('RGB', image.split()[:3])
+        image = Image.composite(image, background, alpha)
+    
     if len(image.split()) > 3:
         resized_image_rgb = torch.cat([PILtoTorch(im, resolution) for im in image.split()[:3]], dim=0)
         loaded_mask = PILtoTorch(image.split()[3], resolution)

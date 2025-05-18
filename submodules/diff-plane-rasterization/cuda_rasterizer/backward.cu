@@ -552,12 +552,12 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 
 			const float4 con_o = collected_conic_opacity[j];
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
-			if (power > 0.0f)
+			if (power > 0.0)
 				continue;
 
 			const float G = exp(power);
-			const float alpha = min(0.99f, con_o.w * G);
-			if (alpha < 1.0f / 255.0f)
+			const float alpha = max(-0.99f, min(0.99f, con_o.w * G));
+			if (alpha < 1.0f / 255.0f && alpha > -1.0f / 255.0f)
 				continue;
 
 			T = T / (1.f - alpha);

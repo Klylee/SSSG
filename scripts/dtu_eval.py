@@ -119,31 +119,33 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='data_in.ply')
     parser.add_argument('--scan', type=int, default=1)
     parser.add_argument('--mode', type=str, default='mesh', choices=['mesh', 'pcd'])
-    parser.add_argument('--dataset_dir', type=str, default='.')
     parser.add_argument('--vis_out_dir', type=str, default='.')
     parser.add_argument('--downsample_density', type=float, default=0.2)
     parser.add_argument('--patch_size', type=float, default=60)
     parser.add_argument('--max_dist', type=float, default=20)
     parser.add_argument('--visualize_threshold', type=float, default=10)
     parser.add_argument('--s', type=str, default='chinesedragon')
+    parser.add_argument('--dataset', type=str, default='/home/yuanyouwen/expdata/neuralto')
+    parser.add_argument('--recon_f', type=str, default='output_neuralto/chinesedragon/test/mesh/tsdf_fusion_post.obj')
     parser.add_argument('--mc', action='store_true', default=False)
     args = parser.parse_args()
 
-    dataset_file = f'/home/yuanyouwen/expdata/neuralto/{args.s}'
-    output_file = f'output_neuralto/{args.s}/test'
-    gt_mesh_file = f'/home/yuanyouwen/expdata/neuralto/gt_mesh/{args.s}.obj'
-    # gt_mesh_file = '/home/yuanyouwen/Experiments/PGSR_my/chinesedragon.obj'
-
-    # reconstructed_mesh_file = 'tsdf_fusion_post.obj'
-    # reconstructed_mesh_file = 'tsdf_fusion_post-pgsr2.obj'
-    reconstructed_mesh_file = 'dragon_5k.ply'
-    # reconstructed_mesh_file = '00080000.ply'
-
-    # reconstructed_mesh_file = 'filtered_mesh_pgsr.obj'
-    # reconstructed_mesh_file = 'filtered_tsdf_fusion_post.obj'
+    dataset_dir = os.path.join(args.dataset, args.s)
+    gt_mesh_file = os.path.join(args.dataset, 'gt_mesh', f'{args.s}.obj')
+    reconstructed_mesh_file = args.recon_f
+    reconstructed_mesh_dir = os.path.dirname(reconstructed_mesh_file)
 
     if not os.path.exists(gt_mesh_file):
-        print('not exists gt mesh file')
+        print('not exists gt mesh file: ' + gt_mesh_file)
+        exit(0)
+
+    if not os.path.exists(reconstructed_mesh_file):
+        reconstructed_mesh_file = reconstructed_mesh_file.replace('.ply', '.obj')
+        if not os.path.exists(reconstructed_mesh_file):
+            print('not exists reconstructed mesh file: ' + reconstructed_mesh_file)
+            exit(0)
+    
+    os.makedirs(os.path.join(reconstructed_mesh_dir, 'eval'), exist_ok=True)
     
     num_points = 1000_000
 
@@ -153,12 +155,12 @@ if __name__ == '__main__':
     
     thresh = args.downsample_density
     if args.mode == 'mesh':
-        reconstructed_mesh = trimesh.load_mesh(os.path.join(output_file, 'mesh', reconstructed_mesh_file))
+        reconstructed_mesh = trimesh.load_mesh(reconstructed_mesh_file)
 
         if mask_cull:
              # load masks
-            train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
-            test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
+            train_cam_infos = readCamerasFromTransforms(dataset_dir, "transforms_train.json", white_background=False)
+            test_cam_infos = readCamerasFromTransforms(dataset_dir, "transforms_test.json", white_background=False)
             train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
             test_cameras = cameraList_from_camInfos(test_cam_infos, 1.0, lp.extract(args))
             all_cameras = train_cameras + test_cameras
@@ -211,7 +213,7 @@ if __name__ == '__main__':
             reconstructed_mesh = o3d.geometry.TriangleMesh()
             reconstructed_mesh.vertices = o3d.utility.Vector3dVector(new_vertices)
             reconstructed_mesh.triangles = o3d.utility.Vector3iVector(new_faces)
-            o3d.io.write_triangle_mesh(os.path.join(output_file, 'mesh', 'filtered_' + reconstructed_mesh_file), reconstructed_mesh)
+            o3d.io.write_triangle_mesh(os.path.join(reconstructed_mesh_dir, 'eval', 'filtered_' + reconstructed_mesh_file), reconstructed_mesh)
             
         
         # align points cloud
@@ -262,10 +264,11 @@ if __name__ == '__main__':
         reconstructed_mesh.transform(reg3.transformation)
         reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
 
-        if True:
+        depth_map_file = f"/home/yuanyouwen/expdata/neuralto/depth/{args.s}.npy"
+        if os.path.exists(depth_map_file):
             # load masks
-            train_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_train.json", white_background=False)
-            test_cam_infos = readCamerasFromTransforms(dataset_file, "transforms_test.json", white_background=False)
+            train_cam_infos = readCamerasFromTransforms(dataset_dir, "transforms_train.json", white_background=False)
+            test_cam_infos = readCamerasFromTransforms(dataset_dir, "transforms_test.json", white_background=False)
             train_cameras = cameraList_from_camInfos(train_cam_infos, 1.0, lp.extract(args))
             all_cameras = train_cameras
             
@@ -274,7 +277,7 @@ if __name__ == '__main__':
             gt_points = torch.from_numpy(np.asarray(gt_pcd.points)).cuda()
             gt_points = torch.cat((gt_points, torch.ones_like(recon_points[:, :1])), dim=-1).float()
 
-            depths = np.load(f"/home/yuanyouwen/expdata/neuralto/depth/{args.s}.npy")
+            depths = np.load(depth_map_file)
             depths = torch.from_numpy(depths).cuda()
             
             visibility = depth_filter(recon_points, depths, all_cameras)
@@ -282,13 +285,17 @@ if __name__ == '__main__':
             visibility = depth_filter(gt_points, depths, all_cameras)
             gt_pcd.points = o3d.utility.Vector3dVector(np.asarray(gt_pcd.points)[visibility])
 
-        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'rec.ply'), reconstructed_pcd)
-        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', 'gt.ply'), gt_pcd)
+        o3d.io.write_point_cloud(os.path.join(reconstructed_mesh_dir, 'eval', 'rec.ply'), reconstructed_pcd)
+        o3d.io.write_point_cloud(os.path.join(reconstructed_mesh_dir, 'eval', 'gt.ply'), gt_pcd)
 
         cd, cd1, cd2, dist_rg = chamfer_distance(np.asarray(gt_pcd.points), np.asarray(reconstructed_pcd.points))
-        print(f"Chamfer distance: {cd}\n \
-                 {cd1}\n \
-                 {cd2}")
+        
+        print("-----------------------")
+        print(reconstructed_mesh_file)
+        print("-----------------------")
+        print(f"Chamfer distance: {cd}")
+        print(f"     gt -> recon: {cd1}")
+        print(f"     recon -> gt: {cd2}")
 
         dist_degree = dist_rg.squeeze() / 0.002
         dist_degree = dist_degree.astype(int)
@@ -306,4 +313,4 @@ if __name__ == '__main__':
         colored_pcd = o3d.geometry.PointCloud()
         colored_pcd.points = o3d.utility.Vector3dVector(reconstructed_pcd.points)
         colored_pcd.colors = o3d.utility.Vector3dVector(colors)
-        o3d.io.write_point_cloud(os.path.join(output_file, 'mesh', f"colored-{args.s}.ply"), colored_pcd)
+        o3d.io.write_point_cloud(os.path.join(reconstructed_mesh_dir, 'eval', f"colored-{args.s}.ply"), colored_pcd)

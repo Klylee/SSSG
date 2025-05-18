@@ -44,6 +44,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     render_pbr_path = os.path.join(model_path, name, "ours_{}".format(iteration), "pbrs")
+    render_materials_path = os.path.join(model_path, name, "ours_{}".format(iteration), "materials")
     render_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_depth")
     render_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_normal")
 
@@ -52,6 +53,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
     makedirs(render_depth_path, exist_ok=True)
     makedirs(render_normal_path, exist_ok=True)
     makedirs(render_pbr_path, exist_ok=True)
+    makedirs(render_materials_path, exist_ok=True)
 
     gaussians.update_visibility(64)
 
@@ -63,7 +65,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         rendered_pbr = out["pbr"]
         _, H, W = rendering.shape
 
-        # mask = view.mask.
+        mask = view.mask.float()
         depth = out["plane_depth"].squeeze()
         alpha = out["alpha"].squeeze()
         depth_tsdf = depth.clone() * alpha
@@ -77,6 +79,11 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         normal = normal.detach().cpu().numpy()
         normal = ((normal+1) * 127.5).astype(np.uint8).clip(0, 255)
 
+        diffuse = out["diffuse"]
+        specular = out["specular"]
+        scatter = out["scatter"]
+        materials = torch.cat([diffuse, specular, scatter], dim=2).clamp(0.0, 1.0)
+
         if name == 'test':
             torchvision.utils.save_image(gt.clamp(0.0, 1.0), os.path.join(gts_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name + ".png"))
@@ -85,6 +92,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
             torchvision.utils.save_image(gt.clamp(0.0, 1.0), os.path.join(gts_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendered_pbr, os.path.join(render_pbr_path, view.image_name + ".png"))
+            torchvision.utils.save_image(materials, os.path.join(render_materials_path, view.image_name + ".png"))
         cv2.imwrite(os.path.join(render_depth_path, view.image_name + ".jpg"), depth_color)
         cv2.imwrite(os.path.join(render_normal_path, view.image_name + ".jpg"), normal)
 
@@ -171,6 +179,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool,
                  max_depth : float, voxel_size : float, use_depth_filter : bool):
     with torch.no_grad():
+        scene_name = dataset.model_path.split('/')[-2]
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         direct_light = DirectLightMap()
@@ -198,7 +207,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             voxel_length=voxel_size,
             sdf_trunc=4.0*voxel_size,
             color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8)
-
+        
         if not skip_train:
             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), scene, gaussians, pipeline, background, 
                        max_depth=max_depth, volume=volume, use_depth_filter=use_depth_filter, inner_gs=inner_gaussians, env_light_map=direct_light)
@@ -208,16 +217,16 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             path = os.path.join(dataset.model_path, "mesh")
             os.makedirs(path, exist_ok=True)
             
-            o3d.io.write_triangle_mesh(os.path.join(path, "tsdf_fusion.obj"), mesh, 
+            o3d.io.write_triangle_mesh(os.path.join(path, f"tsdf_fusion-{scene_name}.obj"), mesh, 
                                        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
             mesh = clean_mesh(mesh)
             mesh.remove_unreferenced_vertices()
             mesh.remove_degenerate_triangles()
-            o3d.io.write_triangle_mesh(os.path.join(path, "tsdf_fusion_post.obj"), mesh, 
+            o3d.io.write_triangle_mesh(os.path.join(path, f"tsdf_fusion_post-{scene_name}.obj"), mesh, 
                                        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
 
         if not skip_test:
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background, env_light_map=direct_env_light)
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background, inner_gs=inner_gaussians, env_light_map=direct_light)
 
 if __name__ == "__main__":
     torch.set_num_threads(8)
@@ -243,7 +252,7 @@ if __name__ == "__main__":
     args.resolution = 1
     args.ncc_scale = 1
 
-    # args.iteration = 80000
+    args.it = 100000
     # Initialize system state (RNG)
     safe_state(args.quiet)
     print(f"multi_view_num {model.multi_view_num}")

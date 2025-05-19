@@ -61,7 +61,7 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         gt, _ = view.get_image()
         out = render(view, gaussians, pipeline, background, app_model=app_model, return_pbr=True, direct_light=env_light_map, inner_gs=inner_gs)
-        rendering = out["render1"].clamp(0.0, 1.0)
+        rendering = out["render"].clamp(0.0, 1.0)
         rendered_pbr = out["pbr"]
         _, H, W = rendering.shape
 

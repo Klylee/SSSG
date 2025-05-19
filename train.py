@@ -92,10 +92,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # os.system(f'rm -rf {dataset.model_path}/app_model')
 
     gaussians = GaussianModel(dataset.sh_degree)
-    inner_gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians, inner_gaussians)
+    inner_gaussians = None
+    scene = Scene(dataset, gaussians, inner_gaussians=inner_gaussians)
     gaussians.training_setup(opt)
-    inner_gaussians.training_setup(opt)
 
     if gaussians.use_pbr:
         direct_light = DirectLightMap()
@@ -105,17 +104,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     app_model.train()
     app_model.cuda()
     
-    scene_name = dataset.model_path.split('/')[-2]
-    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt30000.pth"
+    checkpoint = f"{dataset.model_path}/chkpnt30000.pth"
     if checkpoint and os.path.exists(checkpoint):
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
         app_model.load_weights(scene.model_path)
-
-        if os.path.exists(checkpoint.replace('chkpnt', 'inner_chkpnt')):
-            (model_params, first_iter) = torch.load(checkpoint.replace('chkpnt', 'inner_chkpnt'))
-            inner_gaussians.restore(model_params, opt)
-
+        
         if gaussians.use_pbr and os.path.exists(checkpoint.replace('chkpnt', 'env_light')):
             direct_light.create_from_ckpt(checkpoint.replace('chkpnt', 'env_light'), opt, True)
 
@@ -140,7 +134,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if gaussians.use_pbr:
         gaussians.update_visibility(pipe.sample_num)
 
-    use_inner_gs = True
+    use_inner_gs = False
     inner_gs_start = 1000
     ratio = 1.0
     opt.multi_view_weight_from_iter = 75000
@@ -173,9 +167,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        
-        # if iteration > opt.single_view_weight_from_iter and gaussians.get_xyz.shape[0] != 0 and gaussians.get_xyz.shape[0] != gaussians._incident_dirs.shape[0]:
-        #     gaussians.update_visibility(pipe.sample_num)
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, app_model=app_model,
@@ -183,9 +174,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             return_depth_normal=iteration>opt.single_view_weight_from_iter,
                             return_pbr=True, direct_light=direct_light, inner_gs=inner_gaussians if use_inner_gs else None)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-
-        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
-            image = render_pkg['render1']
 
         # Loss
         ssim_loss = (1.0 - ssim(image, gt_image))
@@ -383,7 +371,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "pbr": f"{ema_pbr_loss_for_log:.{5}f}",
                     "light": f"{direct_light.colocated_light.item():.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}",
-                    "inner": f"{len(inner_gaussians.get_xyz)}",
+                    "inner": "0",
                     "ratio": f"{ratio:.{5}f}",
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -495,8 +483,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 app_model.save_weights(scene.model_path, iteration)
-                torch.save((direct_light.capture(), iteration), scene.model_path + '/env_light' + str(iteration) + '.pth')
-                torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
+                if gaussians.use_pbr:
+                    torch.save((direct_light.capture(), iteration), scene.model_path + '/env_light' + str(iteration) + '.pth')
+                if use_inner_gs:
+                    torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
             # if iteration == 33000:
             #     torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
     

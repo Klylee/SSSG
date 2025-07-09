@@ -201,7 +201,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # <start> 2025-03-12
         # restrain the inner_gs to the inner part of the model
         # if use_inner_gs and use_density_prune == False:
-        if False and use_inner_gs and iteration > 50000:
+        if use_inner_gs and iteration > 50000:
             inner_gs_points = torch.cat([inner_gaussians.get_xyz, torch.ones([inner_gaussians.get_xyz.shape[0], 1], device="cuda")], dim=-1)
             cam_points =  inner_gs_points @ viewpoint_cam.full_proj_transform
             ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
@@ -337,12 +337,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 normal_show = (((normal+1.0)*0.5).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
                 depth_normal_show = (((depth_normal+1.0)*0.5).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
 
-                # if iteration > opt.multi_view_weight_from_iter:
-                #     d_mask_show = (weights.float()*255).detach().cpu().numpy().astype(np.uint8).reshape(H,W)
-                #     d_mask_show_color = cv2.applyColorMap(d_mask_show, cv2.COLORMAP_JET)
-                # else:
-                # d_mask_show_color = np.zeros_like(gt_img_show).astype(np.uint8)
-                
                 depth = render_pkg['plane_depth'].squeeze().detach().cpu().numpy()
                 depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
                 depth_i = (depth_i * 255).clip(0, 255).astype(np.uint8)

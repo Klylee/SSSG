@@ -10,9 +10,9 @@ def is_gpu_idle(gpu_index=0, threshold=10):
     return util.gpu < threshold
 
 gpu = 1
-scene = "cat"
-# output_dir = f"results/wo_fresnel/{scene}"
-output_dir = f"output_neuralto/{scene}"
+scene = "acientdragon"
+output_dir = f"results/wo_fresnel/{scene}"
+# output_dir = f"output_neuralto/{scene}"
 
 check_interval = 60  # seconds
 while True:

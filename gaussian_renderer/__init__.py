@@ -287,8 +287,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             surf_color = light_colors * f_d
             specular = light_colors * f_s
 
-            #
-            pbr = specular + 0.1 * (1-frac0.permute(2,0,1)) * (1-frac0.permute(2,0,1)) * surf_color  + (1 - frac0.permute(2,0,1)) * rendered_scatter
+            # 0.3 * (1-frac0.permute(2,0,1)) * (1-frac0.permute(2,0,1))
+            pbr = specular + frac0.permute(2,0,1) * surf_color  + (1 - frac0.permute(2,0,1)) * rendered_scatter
             # <end>
 
             return_dict.update(

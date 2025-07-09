@@ -29,11 +29,13 @@ print("Optimizing " + args.model_path)
 
 gaussians = GaussianModel(3)
 
-# checkpoint = "./debug/best/yuanbao/test/chkpnt100000.pth"
-# (model_params, first_iter) = torch.load(checkpoint)
-# gaussians.restore(model_params, op.extract(args))
+checkpoint = "./output_neuralto/nail/test/chkpnt100000.pth"
+(model_params, first_iter) = torch.load(checkpoint)
+gaussians.restore(model_params, op.extract(args))
 
-gaussians.load_ply('debug/pgsr/point_cloud-yuanbao.ply')
+
+
+# gaussians.load_ply('debug/pgsr/point_cloud-yuanbao.ply')
 
 # sign = gaussians.get_opacity
 # pos = (sign > 0).sum()
@@ -64,9 +66,10 @@ colors = palette[opacity_degree]
 # # 设置点云的点和颜色
 point_cloud.points = o3d.utility.Vector3dVector(centers.tolist())  # 设置点坐标
 point_cloud.colors = o3d.utility.Vector3dVector(colors)  # 设置点颜色
+# point_cloud.paint_uniform_color([58 / , 154, 199])
 
 # # 保存点云到文件，例如保存为 PLY 格式
-o3d.io.write_point_cloud("./debug/opacity-our.ply", point_cloud)
+o3d.io.write_point_cloud("./debug/nail_inner.ply", point_cloud)
 
 # checkpoint = "./output_neuralto/chinesedragon/test/env_light80000.pth"
 # direct_light = DirectLightMap()

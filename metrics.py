@@ -25,7 +25,7 @@ def readImages(renders_dir, gt_dir):
     renders = []
     gts = []
     image_names = []
-    for fname in os.listdir(renders_dir):
+    for fname in os.listdir(gt_dir):
         render = Image.open(renders_dir / fname)
         gt = Image.open(gt_dir / fname)
         renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
@@ -34,7 +34,6 @@ def readImages(renders_dir, gt_dir):
     return renders, gts, image_names
 
 def evaluate(model_paths):
-
     full_dict = {}
     per_view_dict = {}
     full_dict_polytopeonly = {}
@@ -71,6 +70,11 @@ def evaluate(model_paths):
                 psnrs = []
                 lpipss = []
 
+                # default = torch.zeros_like(gts[0])
+                # for idx in tqdm(range(len(gts)), desc="Metric evaluation progress"):
+                #     ssims.append(  ssim(default, gts[idx]))
+                #     psnrs.append(  psnr(default, gts[idx]))
+                #     lpipss.append(lpips(default, gts[idx], net_type='vgg'))
                 for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                     ssims.append(ssim(renders[idx], gts[idx]))
                     psnrs.append(psnr(renders[idx], gts[idx]))

@@ -185,7 +185,7 @@ if __name__ == '__main__':
                     point2d[:, 0] = point2d[:, 0].clamp(0, camera.image_width - 1)
                     point2d[:, 1] = point2d[:, 1].clamp(0, camera.image_height - 1)
                     
-                    mask = binary_dilation((camera.mask).float(), 5).bool()
+                    mask = binary_dilation((camera.mask).float(), 8).bool()
                     valid = in_image & mask[point2d[:, 1].long(), point2d[:, 0].long()]
                     visibility &= valid.cpu().numpy()
 
@@ -213,7 +213,7 @@ if __name__ == '__main__':
             reconstructed_mesh = o3d.geometry.TriangleMesh()
             reconstructed_mesh.vertices = o3d.utility.Vector3dVector(new_vertices)
             reconstructed_mesh.triangles = o3d.utility.Vector3iVector(new_faces)
-            o3d.io.write_triangle_mesh(os.path.join(reconstructed_mesh_dir, 'eval', 'filtered_' + reconstructed_mesh_file), reconstructed_mesh)
+            o3d.io.write_triangle_mesh(os.path.join(reconstructed_mesh_dir, 'filtered_' + os.path.basename(reconstructed_mesh_file)), reconstructed_mesh)
             
         
         # align points cloud
@@ -265,7 +265,7 @@ if __name__ == '__main__':
         reconstructed_pcd = reconstructed_mesh.sample_points_uniformly(number_of_points=num_points)
 
         depth_map_file = f"/home/yuanyouwen/expdata/neuralto/depth/{args.s}.npy"
-        if os.path.exists(depth_map_file):
+        if False and os.path.exists(depth_map_file):
             # load masks
             train_cam_infos = readCamerasFromTransforms(dataset_dir, "transforms_train.json", white_background=False)
             test_cam_infos = readCamerasFromTransforms(dataset_dir, "transforms_test.json", white_background=False)

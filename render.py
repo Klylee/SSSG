@@ -82,12 +82,15 @@ def render_set(model_path, name, iteration, views, scene, gaussians, pipeline, b
         diffuse = out["diffuse"]
         specular = out["specular"]
         scatter = out["scatter"]
-        materials = torch.cat([diffuse, specular, scatter], dim=2).clamp(0.0, 1.0)
+        roughness = out["roughness"].unsqueeze(0).repeat(3,1,1)
+        base_color = out["base_color"]
+        materials = torch.cat([diffuse, specular, scatter, roughness, base_color], dim=2).clamp(0.0, 1.0)
 
         if name == 'test':
             torchvision.utils.save_image(gt.clamp(0.0, 1.0), os.path.join(gts_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendered_pbr, os.path.join(render_pbr_path, view.image_name + ".png"))
+            torchvision.utils.save_image(materials, os.path.join(render_materials_path, view.image_name + ".png"))
         else:
             torchvision.utils.save_image(gt.clamp(0.0, 1.0), os.path.join(gts_path, view.image_name + ".png"))
             torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name + ".png"))
@@ -212,18 +215,18 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), scene, gaussians, pipeline, background, 
                        max_depth=max_depth, volume=volume, use_depth_filter=use_depth_filter, inner_gs=inner_gaussians, env_light_map=direct_light)
             print(f"extract_triangle_mesh")
-            mesh = volume.extract_triangle_mesh()
+            # mesh = volume.extract_triangle_mesh()
 
-            path = os.path.join(dataset.model_path, "mesh")
-            os.makedirs(path, exist_ok=True)
+            # path = os.path.join(dataset.model_path, "mesh")
+            # os.makedirs(path, exist_ok=True)
             
-            o3d.io.write_triangle_mesh(os.path.join(path, f"tsdf_fusion-{scene_name}.obj"), mesh, 
-                                       write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
-            mesh = clean_mesh(mesh)
-            mesh.remove_unreferenced_vertices()
-            mesh.remove_degenerate_triangles()
-            o3d.io.write_triangle_mesh(os.path.join(path, f"tsdf_fusion_post-{scene_name}.obj"), mesh, 
-                                       write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
+            # o3d.io.write_triangle_mesh(os.path.join(path, f"tsdf_fusion-{scene_name}.obj"), mesh, 
+            #                            write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
+            # mesh = clean_mesh(mesh)
+            # mesh.remove_unreferenced_vertices()
+            # mesh.remove_degenerate_triangles()
+            # o3d.io.write_triangle_mesh(os.path.join(path, f"tsdf_fusion_post-{scene_name}.obj"), mesh, 
+            #                            write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True)
 
         if not skip_test:
             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, gaussians, pipeline, background, inner_gs=inner_gaussians, env_light_map=direct_light)

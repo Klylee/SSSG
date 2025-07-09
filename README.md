@@ -1,7 +1,7 @@
 # SSSG: Subsurface Scattering Gaussians for Surface Reconstruction of Translucent Objects
 
 SSSG is a novel 3DGS-based surface reconstruction pipeline for translucent objects. It is realized based on PGSR.
-The code is under orgnizing.
+The code is under organization.
 
 ## Installation
 

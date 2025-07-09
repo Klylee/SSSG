@@ -1,15 +1,8 @@
 {
-    "cmake.sourceDirectory": "/home/yuanyouwen/Experiments/PGSR_my/submodules/diff-plane-rasterization",
     "files.associations": {
-        "tuple": "cpp",
-        "*.tcc": "cpp",
+        "random": "cpp",
         "chrono": "cpp",
-        "unordered_map": "cpp",
-        "fstream": "cpp",
-        "future": "cpp",
-        "functional": "cpp",
-        "variant": "cpp",
-        "optional": "cpp",
-        "cmath": "cpp"
+        "limits": "cpp",
+        "valarray": "cpp"
     }
 }

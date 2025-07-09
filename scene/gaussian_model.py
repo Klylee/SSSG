@@ -1,14 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, build_scaling
@@ -24,6 +13,7 @@ from pytorch3d.transforms import quaternion_to_matrix
 # from pytorch3d.ops import knn_points
 from bvh import RayTracer
 from utils.graphics_utils import fibonacci_sphere_sampling
+from utils.reloc_utils import compute_relocation_cuda
 
 def dilate(bin_img, ksize=5):
     pad = (ksize - 1) // 2
@@ -146,7 +136,7 @@ class GaussianModel:
             ])
         return captured
     
-    def restore(self, model_args, training_args):
+    def restore(self, model_args, training_args = None):
         (self.active_sh_degree, 
         self._xyz, 
         self._knn_f,
@@ -175,12 +165,13 @@ class GaussianModel:
              self._visibility_dc,
              self._visibility_rest) = model_args[16:]
         
-        self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
-        self.denom = denom
-        self.denom_abs = denom_abs
-        self.optimizer.load_state_dict(opt_dict)
+        if training_args != None:
+            self.training_setup(training_args)
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
+            self.denom = denom
+            self.denom_abs = denom_abs
+            self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):
@@ -701,33 +692,29 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_normal, new_knn_f, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation,
-                              new_base_color=None, new_roughness=None,
-                              new_incidents_dc=None, new_incidents_rest=None,
-                              new_scatters_dc=None, new_scatters_rest=None,
-                              new_visibility_dc=None, new_visibility_rest=None):
-        d = {"xyz": new_xyz,
-        "knn_f": new_knn_f,
-        "f_dc": new_features_dc,
-        "f_rest": new_features_rest,
-        "opacity": new_opacities,
-        "scaling" : new_scaling,
-        "rotation" : new_rotation}
+    def densification_postfix(self, new_tensors_dict, reset_param = True):
+        # d = {"xyz": new_xyz,
+        # "knn_f": new_knn_f,
+        # "f_dc": new_features_dc,
+        # "f_rest": new_features_rest,
+        # "opacity": new_opacities,
+        # "scaling" : new_scaling,
+        # "rotation" : new_rotation}
 
-        if self.use_pbr:
-            d.update({
-                "normal": new_normal,
-                "base_color": new_base_color,
-                "roughness": new_roughness,
-                "incidents_dc": new_incidents_dc,
-                "incidents_rest": new_incidents_rest,
-                "scatters_dc": new_scatters_dc,
-                "scatters_rest": new_scatters_rest,
-                "visibility_dc": new_visibility_dc,
-                "visibility_rest": new_visibility_rest,
-            })
+        # if self.use_pbr:
+        #     d.update({
+        #         "normal": new_normal,
+        #         "base_color": new_base_color,
+        #         "roughness": new_roughness,
+        #         "incidents_dc": new_incidents_dc,
+        #         "incidents_rest": new_incidents_rest,
+        #         "scatters_dc": new_scatters_dc,
+        #         "scatters_rest": new_scatters_rest,
+        #         "visibility_dc": new_visibility_dc,
+        #         "visibility_rest": new_visibility_rest,
+        #     })
 
-        optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        optimizable_tensors = self.cat_tensors_to_optimizer(new_tensors_dict)
         self._xyz = optimizable_tensors["xyz"]
         self._knn_f = optimizable_tensors["knn_f"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -735,13 +722,6 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.max_weight = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
         if self.use_pbr:
             self._normal = optimizable_tensors["normal"]
@@ -753,6 +733,14 @@ class GaussianModel:
             self._scatters_rest = optimizable_tensors["scatters_rest"]
             self._visibility_dc = optimizable_tensors["visibility_dc"]
             self._visibility_rest = optimizable_tensors["visibility_rest"]
+        
+        if reset_param:
+            self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.denom_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+            self.max_weight = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, grads_abs, grad_abs_threshold, scene_extent, max_radii2D, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -791,36 +779,59 @@ class GaussianModel:
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_normal = self._normal[selected_pts_mask].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
-        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
-        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
-        new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        new_knn_f = self._knn_f[selected_pts_mask].repeat(N,1)
+        # new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        # new_normal = self._normal[selected_pts_mask].repeat(N, 1)
+        # new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        # new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        # new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
+        # new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
+        # new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        # new_knn_f = self._knn_f[selected_pts_mask].repeat(N,1)
 
-        args = [new_xyz, new_normal, new_knn_f, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation]
+        new_tensors_dict = {
+            "xyz": torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1),
+            "knn_f": self._knn_f[selected_pts_mask].repeat(N,1),
+            "f_dc": self._features_dc[selected_pts_mask].repeat(N,1,1),
+            "f_rest": self._features_rest[selected_pts_mask].repeat(N,1,1),
+            "opacity": self._opacity[selected_pts_mask].repeat(N,1),
+            "scaling" : self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N)),
+            "rotation" : self._rotation[selected_pts_mask].repeat(N,1)
+        }
         if self.use_pbr:
-            new_base_color = self._base_color[selected_pts_mask].repeat(N, 1)
-            new_roughness = self._roughness[selected_pts_mask].repeat(N, 1)
-            new_incidents_dc = self._incidents_dc[selected_pts_mask].repeat(N, 1, 1)
-            new_incidents_rest = self._incidents_rest[selected_pts_mask].repeat(N, 1, 1)
-            new_scatters_dc = self._scatters_dc[selected_pts_mask].repeat(N, 1, 1)
-            new_scatters_rest = self._scatters_rest[selected_pts_mask].repeat(N, 1, 1)
-            new_visibility_dc = self._visibility_dc[selected_pts_mask].repeat(N, 1, 1)
-            new_visibility_rest = self._visibility_rest[selected_pts_mask].repeat(N, 1, 1)
-            args.extend([
-                new_base_color,
-                new_roughness,
-                new_incidents_dc,
-                new_incidents_rest,
-                new_scatters_dc,
-                new_scatters_rest,
-                new_visibility_dc,
-                new_visibility_rest,
-            ])
-        self.densification_postfix(*args)
+            new_tensors_dict.update({
+                "normal": self._normal[selected_pts_mask].repeat(N, 1),
+                "base_color": self._base_color[selected_pts_mask].repeat(N, 1),
+                "roughness": self._roughness[selected_pts_mask].repeat(N, 1),
+                "incidents_dc": self._incidents_dc[selected_pts_mask].repeat(N, 1, 1),
+                "incidents_rest": self._incidents_rest[selected_pts_mask].repeat(N, 1, 1),
+                "scatters_dc": self._scatters_dc[selected_pts_mask].repeat(N, 1, 1),
+                "scatters_rest": self._scatters_rest[selected_pts_mask].repeat(N, 1, 1),
+                "visibility_dc": self._visibility_dc[selected_pts_mask].repeat(N, 1, 1),
+                "visibility_rest": self._visibility_rest[selected_pts_mask].repeat(N, 1, 1)
+            })
+        self.densification_postfix(new_tensors_dict)
+
+        # args = [new_xyz, new_normal, new_knn_f, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation]
+        # if self.use_pbr:
+        #     new_base_color = self._base_color[selected_pts_mask].repeat(N, 1)
+        #     new_roughness = self._roughness[selected_pts_mask].repeat(N, 1)
+        #     new_incidents_dc = self._incidents_dc[selected_pts_mask].repeat(N, 1, 1)
+        #     new_incidents_rest = self._incidents_rest[selected_pts_mask].repeat(N, 1, 1)
+        #     new_scatters_dc = self._scatters_dc[selected_pts_mask].repeat(N, 1, 1)
+        #     new_scatters_rest = self._scatters_rest[selected_pts_mask].repeat(N, 1, 1)
+        #     new_visibility_dc = self._visibility_dc[selected_pts_mask].repeat(N, 1, 1)
+        #     new_visibility_rest = self._visibility_rest[selected_pts_mask].repeat(N, 1, 1)
+        #     args.extend([
+        #         new_base_color,
+        #         new_roughness,
+        #         new_incidents_dc,
+        #         new_incidents_rest,
+        #         new_scatters_dc,
+        #         new_scatters_rest,
+        #         new_visibility_dc,
+        #         new_visibility_rest,
+        #     ])
+        # self.densification_postfix(*args)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -841,43 +852,65 @@ class GaussianModel:
 
         if selected_pts_mask.sum() > 0:
             # print(f"clone {selected_pts_mask.sum()}")
-            new_xyz = self._xyz[selected_pts_mask]
-
             stds = self.get_scaling[selected_pts_mask]
             means =torch.zeros((stds.size(0), 3),device="cuda")
             samples = torch.normal(mean=means, std=stds)
             rots = build_rotation(self._rotation[selected_pts_mask])
-            new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask]
-            new_normal = self._normal[selected_pts_mask]
-            new_features_dc = self._features_dc[selected_pts_mask]
-            new_features_rest = self._features_rest[selected_pts_mask]
-            new_opacities = self._opacity[selected_pts_mask]
-            new_scaling = self._scaling[selected_pts_mask]
-            new_rotation = self._rotation[selected_pts_mask]
-            new_knn_f = self._knn_f[selected_pts_mask]
 
-            args = [new_xyz, new_normal, new_knn_f, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation]
+            # new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask]
+            # new_normal = self._normal[selected_pts_mask]
+            # new_features_dc = self._features_dc[selected_pts_mask]
+            # new_features_rest = self._features_rest[selected_pts_mask]
+            # new_opacities = self._opacity[selected_pts_mask]
+            # new_scaling = self._scaling[selected_pts_mask]
+            # new_rotation = self._rotation[selected_pts_mask]
+            # new_knn_f = self._knn_f[selected_pts_mask]
+
+            # args = [new_xyz, new_normal, new_knn_f, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation]
+            # if self.use_pbr:
+            #     new_base_color = self._base_color[selected_pts_mask]
+            #     new_roughness = self._roughness[selected_pts_mask]
+            #     new_incidents_dc = self._incidents_dc[selected_pts_mask]
+            #     new_incidents_rest = self._incidents_rest[selected_pts_mask]
+            #     new_scatters_dc = self._scatters_dc[selected_pts_mask]
+            #     new_scatters_rest = self._scatters_rest[selected_pts_mask]
+            #     new_visibility_dc = self._visibility_dc[selected_pts_mask]
+            #     new_visibility_rest = self._visibility_rest[selected_pts_mask]
+
+            #     args.extend([
+            #         new_base_color,
+            #         new_roughness,
+            #         new_incidents_dc,
+            #         new_incidents_rest,
+            #         new_scatters_dc,
+            #         new_scatters_rest,
+            #         new_visibility_dc,
+            #         new_visibility_rest,
+            #     ])
+            # self.densification_postfix(*args)
+        
+            new_tensors_dict = {
+                "xyz": torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask],
+                "knn_f": self._knn_f[selected_pts_mask],
+                "f_dc": self._features_dc[selected_pts_mask],
+                "f_rest": self._features_rest[selected_pts_mask],
+                "opacity": self._opacity[selected_pts_mask],
+                "scaling" : self._scaling[selected_pts_mask],
+                "rotation" : self._rotation[selected_pts_mask]
+            }
             if self.use_pbr:
-                new_base_color = self._base_color[selected_pts_mask]
-                new_roughness = self._roughness[selected_pts_mask]
-                new_incidents_dc = self._incidents_dc[selected_pts_mask]
-                new_incidents_rest = self._incidents_rest[selected_pts_mask]
-                new_scatters_dc = self._scatters_dc[selected_pts_mask]
-                new_scatters_rest = self._scatters_rest[selected_pts_mask]
-                new_visibility_dc = self._visibility_dc[selected_pts_mask]
-                new_visibility_rest = self._visibility_rest[selected_pts_mask]
-
-                args.extend([
-                    new_base_color,
-                    new_roughness,
-                    new_incidents_dc,
-                    new_incidents_rest,
-                    new_scatters_dc,
-                    new_scatters_rest,
-                    new_visibility_dc,
-                    new_visibility_rest,
-                ])
-            self.densification_postfix(*args)
+                new_tensors_dict.update({
+                    "normal": self._normal[selected_pts_mask],
+                    "base_color": self._base_color[selected_pts_mask],
+                    "roughness": self._roughness[selected_pts_mask],
+                    "incidents_dc": self._incidents_dc[selected_pts_mask],
+                    "incidents_rest": self._incidents_rest[selected_pts_mask],
+                    "scatters_dc": self._scatters_dc[selected_pts_mask],
+                    "scatters_rest": self._scatters_rest[selected_pts_mask],
+                    "visibility_dc": self._visibility_dc[selected_pts_mask],
+                    "visibility_rest": self._visibility_rest[selected_pts_mask]
+                })
+            self.densification_postfix(new_tensors_dict)
 
     def densify_and_prune(self, max_grad, abs_max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -889,14 +922,15 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, grads_abs, abs_max_grad, extent, max_radii2D)
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if self.get_xyz.shape[0] > 100:
+            prune_mask = (self.get_opacity < min_opacity).squeeze()
 
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
-        # print(f"all points {self._xyz.shape[0]}")
+            if max_screen_size:
+                big_points_vs = self.max_radii2D > max_screen_size
+                big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            self.prune_points(prune_mask)
+            
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, viewspace_point_tensor_abs, update_filter):
@@ -939,3 +973,196 @@ class GaussianModel:
         pts = (pts-T)@R.transpose(-1,-2)
         return pts
     
+    # <start> new add mcmc 03-14
+
+    def replace_tensors_to_optimizer(self, inds=None):
+        tensors_dict = {
+            "xyz": self._xyz,
+            "knn_f": self._knn_f,            
+            "f_dc": self._features_dc,
+            "f_rest": self._features_rest,
+            "opacity": self._opacity,
+            "scaling" : self._scaling,
+            "rotation" : self._rotation}
+
+        if self.use_pbr:
+            tensors_dict.update({
+                "normal":         self._normal,
+                "base_color":     self._base_color,
+                "roughness":      self._roughness,
+                "incidents_dc":   self._incidents_dc,
+                "incidents_rest": self._incidents_rest,
+                "scatters_dc":    self._scatters_dc,
+                "scatters_rest":  self._scatters_rest,
+                "visibility_dc":  self._visibility_dc,
+                "visibility_rest": self._visibility_rest,
+            })
+
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            if stored_state is not None:
+                if inds is not None:
+                    stored_state["exp_avg"][inds] = 0
+                    stored_state["exp_avg_sq"][inds] = 0
+                else:
+                    stored_state["exp_avg"] = torch.zeros_like(tensor)
+                    stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+            else:
+                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                optimizable_tensors[group["name"]] = group["params"][0]
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._knn_f = optimizable_tensors["knn_f"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
+        if self.use_pbr:
+            self._normal = optimizable_tensors["normal"]
+            self._base_color = optimizable_tensors["base_color"]
+            self._roughness = optimizable_tensors["roughness"]
+            self._incidents_dc = optimizable_tensors["incidents_dc"]
+            self._incidents_rest = optimizable_tensors["incidents_rest"]
+            self._scatters_dc = optimizable_tensors["scatters_dc"]
+            self._scatters_rest = optimizable_tensors["scatters_rest"]
+            self._visibility_dc = optimizable_tensors["visibility_dc"]
+            self._visibility_rest = optimizable_tensors["visibility_rest"]
+
+        torch.cuda.empty_cache()
+        
+        return optimizable_tensors
+
+    def _update_params(self, idxs, ratio):
+        new_opacity, new_scaling = compute_relocation_cuda(
+            opacity_old=self.get_opacity[idxs, 0],
+            scale_old=self.get_scaling[idxs],
+            N=ratio[idxs, 0] + 1
+        )
+        new_opacity = torch.clamp(new_opacity.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
+        new_opacity = self.inverse_opacity_activation(new_opacity)
+        new_scaling = self.scaling_inverse_activation(new_scaling.reshape(-1, 3))
+
+        return self._xyz[idxs], self._features_dc[idxs], self._features_rest[idxs], new_opacity, new_scaling, self._rotation[idxs]
+
+    def _sample_alives(self, probs, num, alive_indices=None):
+        probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
+        sampled_idxs = torch.multinomial(probs, num, replacement=True)
+        if alive_indices is not None:
+            sampled_idxs = alive_indices[sampled_idxs]
+        ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
+        return sampled_idxs, ratio
+    
+    def relocate_gs(self, dead_mask=None):
+
+        if dead_mask.sum() == 0:
+            return
+
+        alive_mask = ~dead_mask 
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
+
+        if alive_indices.shape[0] <= 0:
+            return
+
+        # sample from alive ones based on opacity
+        probs = (self.get_opacity[alive_indices, 0]) 
+        reinit_idx, ratio = self._sample_alives(alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0])
+
+        (
+            self._xyz[dead_indices], 
+            self._features_dc[dead_indices],
+            self._features_rest[dead_indices],
+            self._opacity[dead_indices],
+            self._scaling[dead_indices],
+            self._rotation[dead_indices] 
+        ) = self._update_params(reinit_idx, ratio=ratio)
+        self._knn_f[dead_indices] = self._knn_f[reinit_idx]
+        if self.use_pbr:
+            self._normal[dead_indices] = self._normal[reinit_idx]
+            self._base_color[dead_indices] = self._base_color[reinit_idx]
+            self._roughness[dead_indices] = self._roughness[reinit_idx]
+            self._incidents_dc[dead_indices] = self._incidents_dc[reinit_idx]
+            self._incidents_rest[dead_indices] = self._incidents_rest[reinit_idx]
+            self._scatters_dc[dead_indices] = self._scatters_dc[reinit_idx]
+            self._scatters_rest[dead_indices] = self._scatters_rest[reinit_idx]
+            self._visibility_dc[dead_indices] = self._visibility_dc[reinit_idx]
+            self._visibility_rest[dead_indices] = self._visibility_rest[reinit_idx]
+        
+        self._opacity[reinit_idx] = self._opacity[dead_indices]
+        self._scaling[reinit_idx] = self._scaling[dead_indices]
+
+        self.replace_tensors_to_optimizer(inds=reinit_idx) 
+        
+
+    def add_new_gs(self, cap_max):
+        current_num_points = self._opacity.shape[0]
+        target_num = min(cap_max, int(1.05 * current_num_points))
+        num_gs = max(0, target_num - current_num_points)
+
+        if num_gs <= 0:
+            return 0
+
+        probs = self.get_opacity.squeeze(-1) 
+        add_idx, ratio = self._sample_alives(probs=probs, num=num_gs)
+
+        (
+            new_xyz, 
+            new_features_dc,
+            new_features_rest,
+            new_opacity,
+            new_scaling,
+            new_rotation 
+        ) = self._update_params(add_idx, ratio=ratio)
+        new_knn_f = self._knn_f[add_idx]
+        new_tensors_dict = {
+            "xyz": new_xyz,
+            "knn_f": new_knn_f,
+            "f_dc": new_features_dc,
+            "f_rest": new_features_rest,
+            "opacity": new_opacity,
+            "scaling" : new_scaling,
+            "rotation" : new_rotation
+        }
+        if self.use_pbr:
+            new_tensors_dict.update({
+                "normal": self._normal[add_idx],
+                "base_color": self._base_color[add_idx],
+                "roughness": self._roughness[add_idx],
+                "incidents_dc": self._incidents_dc[add_idx],
+                "incidents_rest": self._incidents_rest[add_idx],
+                "scatters_dc": self._scatters_dc[add_idx],
+                "scatters_rest": self._scatters_rest[add_idx],
+                "visibility_dc": self._visibility_dc[add_idx],
+                "visibility_rest": self._visibility_rest[add_idx]
+            })
+
+        self._opacity[add_idx] = new_opacity
+        self._scaling[add_idx] = new_scaling
+
+        self.densification_postfix(new_tensors_dict, reset_param=False)
+        self.replace_tensors_to_optimizer(inds=add_idx)
+
+        return num_gs
+
+    def add_noise(self, xyz_lr):
+        with torch.no_grad():
+            L = build_scaling_rotation(self.get_scaling, self.get_rotation)
+            actual_covariance = L @ L.transpose(1, 2)
+
+            def op_sigmoid(x, k=100, x0=0.995):
+                return 1 / (1 + torch.exp(-k * (x - x0)))
+            
+            noise = torch.randn_like(self._xyz) * (op_sigmoid(1 - self.get_opacity)) * 5e4 * xyz_lr
+            noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
+            self._xyz.add_(noise)

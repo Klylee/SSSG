@@ -1,47 +1,32 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import os
-from datetime import datetime
+import time
 import torch
 import random
 import numpy as np
-from random import randint
-from utils.loss_utils import l1_loss, ssim, lncc, get_img_grad_weight, first_order_edge_aware_loss
-from utils.graphics_utils import patch_offsets, patch_warp
-from gaussian_renderer import render, network_gui
-import sys, time
-from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
 import cv2
-from torchvision import utils
 import uuid
+import sys, time
+import torch.nn.functional as F
+from datetime import datetime
+from random import randint
+from gaussian_renderer import render, network_gui
 from tqdm import tqdm
-from utils.image_utils import psnr, erode
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from scene import Scene, GaussianModel
 from scene.app_model import AppModel
 from scene.cameras import Camera
 from scene.direct_light_map import DirectLightMap
+from utils.loss_utils import l1_loss, ssim, lncc, get_img_grad_weight, first_order_edge_aware_loss
+from utils.graphics_utils import patch_offsets, patch_warp
+from utils.general_utils import safe_state, build_scaling_rotation
+from utils.image_utils import psnr, erode
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
-import time
-import torch.nn.functional as F
 
-import instant_nsr.models as NeusModels
-from instant_nsr.utils.misc import load_config
-from instant_nsr.systemUtils import parse_optimizer, parse_scheduler
 
 def setup_seed(seed):
      torch.manual_seed(seed)
@@ -86,10 +71,12 @@ def gen_virtul_cam(cam, trans_noise=1.0, deg_noise=15.0):
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
-    # tb_writer = prepare_output_and_logger(dataset)
+
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+    
     # backup main code
-    if not os.path.exists(dataset.model_path):
-        os.makedirs(dataset.model_path)
     cmd = f'cp ./train.py {dataset.model_path}/'
     os.system(cmd)
     cmd = f'cp -rf ./arguments {dataset.model_path}/'
@@ -100,38 +87,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     os.system(cmd)
     cmd = f'cp -rf ./utils {dataset.model_path}/'
     os.system(cmd)
-    cmd = f'rm -rf {dataset.model_path}/debug'
-    os.system(cmd)
     
-    
-    use_neus_sdf = False
+    os.system(f'rm -rf {dataset.model_path}/debug')
+    # os.system(f'rm -rf {dataset.model_path}/app_model')
 
-    if use_neus_sdf:
-        neusModelConfig = load_config('neusConfig/scan24.yaml')
-        train_num_rays = neusModelConfig.model.train_num_rays
-        neusModel = NeusModels.make(neusModelConfig.model.name, neusModelConfig.model)
-        neusModel.train()
-        neusModel.cuda()
-
-        neusOptimizer = parse_optimizer(neusModelConfig.system.optimizer, neusModel)
-        if 'scheduler' in neusModelConfig.system:
-            neusScheduler = parse_scheduler(neusModelConfig.system.scheduler, neusOptimizer)['scheduler']
-        
     gaussians = GaussianModel(dataset.sh_degree)
     inner_gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians, inner_gaussians)
     gaussians.training_setup(opt)
     inner_gaussians.training_setup(opt)
 
+    if gaussians.use_pbr:
+        direct_light = DirectLightMap()
+        direct_light.training_setup(opt)
+
     app_model = AppModel()
     app_model.train()
     app_model.cuda()
-
-    if gaussians.use_pbr:
-        direct_env_light = DirectLightMap(dataset.env_resolution, opt.light_init)
-        direct_env_light.training_setup(opt)
     
-    if checkpoint:
+    scene_name = dataset.model_path.split('/')[-2]
+    checkpoint = f"./output_neuralto/{scene_name}/test/chkpnt30000.pth"
+    if checkpoint and os.path.exists(checkpoint):
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
         app_model.load_weights(scene.model_path)
@@ -141,14 +117,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             inner_gaussians.restore(model_params, opt)
 
         if gaussians.use_pbr and os.path.exists(checkpoint.replace('chkpnt', 'env_light')):
-            direct_env_light.create_from_ckpt(checkpoint.replace('chkpnt', 'env_light'))
+            direct_light.create_from_ckpt(checkpoint.replace('chkpnt', 'env_light'), opt, True)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-
-    if gaussians.use_pbr:
-        gaussians.update_visibility(pipe.sample_num)
-
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -158,31 +130,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_single_view_for_log = 0.0
     ema_multi_view_geo_for_log = 0.0
     ema_multi_view_pho_for_log = 0.0
-    normal_loss, geo_loss, ncc_loss, loss_pbr, loss_p, loss_neus, loss_neus_depth_diff, loss_neus_eikonal = None, None, None, None, None, None, None, None
-    loss_neus_rgb_diff, loss_opacity_in = None, None
-
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", dynamic_ncols=True)
+    normal_loss, geo_loss, ncc_loss = None, None, None
+    loss_pbr = None
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     debug_path = os.path.join(scene.model_path, "debug")
     os.makedirs(debug_path, exist_ok=True)
 
-    if not os.path.exists("./debug"):
-        os.makedirs("./debug")
-    
+    if gaussians.use_pbr:
+        gaussians.update_visibility(pipe.sample_num)
 
-    with open("./debug/loss_data.txt", 'w') as f:
-        f.write('image, pbr, normal_p, opacity_in, neus_rgb, neus_depth, eikonal\n')
-    with open('./debug/point_num.txt', 'w') as f:
-        f.write('point num\n')
+    use_inner_gs = True
+    inner_gs_start = 1000
+    ratio = 1.0
+    opt.multi_view_weight_from_iter = 75000
+    opt.densify_until_iter = 60000
+    reset_opacity_until_iter = 60000
 
+    camera = scene.getTrainCameras()[0]
+    print(f'{camera.resolution} {camera.ncc_scale}')
+
+    use_density_prune = True
     for iteration in range(first_iter, opt.iterations + 1):
+        # if iteration > 60000:
+        #     use_density_prune = False
+        
         iter_start.record()
-        gaussians.update_learning_rate(iteration)
-        inner_gaussians.update_learning_rate(iteration)
+        xyz_lr = gaussians.update_learning_rate(iteration)
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
-            inner_gaussians.oneupSHdegree()
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -190,30 +167,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
         gt_image, gt_image_gray = viewpoint_cam.get_image()
-
-        
         if iteration > 1000 and opt.exposure_compensation:
             gaussians.use_app = True
 
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        pipe.debug = True
-
-        point_num = gaussians.get_xyz.shape[0]
-        if iteration > opt.single_view_weight_from_iter and gaussians.get_xyz.shape[0] != 0 and gaussians.get_xyz.shape[0] != gaussians._incident_dirs.shape[0]:
-            gaussians.update_visibility(pipe.sample_num)
+        
+        # if iteration > opt.single_view_weight_from_iter and gaussians.get_xyz.shape[0] != 0 and gaussians.get_xyz.shape[0] != gaussians._incident_dirs.shape[0]:
+        #     gaussians.update_visibility(pipe.sample_num)
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, app_model=app_model,
-                            return_plane=iteration>opt.single_view_weight_from_iter, return_depth_normal=iteration>opt.single_view_weight_from_iter, return_pbr=True, direct_light=direct_env_light,
-                            inner_gs=inner_gaussians)
+                            return_plane=iteration>opt.single_view_weight_from_iter, 
+                            return_depth_normal=iteration>opt.single_view_weight_from_iter,
+                            return_pbr=True, direct_light=direct_light, inner_gs=inner_gaussians if use_inner_gs else None)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
-        # if iteration > opt.single_view_weight_from_iter + 800:
-        #     image = render_pkg['render1']
-        
-        # image.shape: [C, H, W]
+        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+            image = render_pkg['render1']
 
         # Loss
         ssim_loss = (1.0 - ssim(image, gt_image))
@@ -223,139 +195,86 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1 = l1_loss(image, gt_image)
         image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
+
         loss = image_loss.clone()
+
+        # <start> 2025-03-12
+        # restrain the inner_gs to the inner part of the model
+        # if use_inner_gs and use_density_prune == False:
+        if use_inner_gs and iteration > 50000:
+            inner_gs_points = torch.cat([inner_gaussians.get_xyz, torch.ones([inner_gaussians.get_xyz.shape[0], 1], device="cuda")], dim=-1)
+            cam_points =  inner_gs_points @ viewpoint_cam.full_proj_transform
+            ndc_points = cam_points[:, :2] / (cam_points[:, 2].unsqueeze(1) + 1e-6)
+            point2d_x = (ndc_points[:, 0] + 1) * 0.5 * viewpoint_cam.image_width
+            point2d_y = (ndc_points[:, 1] + 1) * 0.5 * viewpoint_cam.image_height
+            point2d = torch.stack([point2d_x, point2d_y, cam_points[:, 2]], dim=-1)
+            in_image = (point2d[:, 0] >= 0) & (point2d[:, 0] < viewpoint_cam.image_width) & (point2d[:, 1] >= 0) & (point2d[:, 1] < viewpoint_cam.image_height)
+            point2d = point2d[in_image]
+            point2d_x = point2d[:, 0].clamp(0, viewpoint_cam.image_width - 1).long()
+            point2d_y = point2d[:, 1].clamp(0, viewpoint_cam.image_height - 1).long()
+            surface_depth = render_pkg['plane_depth'].squeeze()[point2d_y, point2d_x]
+            depth_diff = surface_depth - point2d[:, 2]
+            
+            inner_opacity = inner_gaussians.get_opacity
+            inner_opacity = inner_opacity[in_image]
+            inner_opacity = inner_opacity[depth_diff > 0 - 0.00001]
+            inner_restrain_loss = 0.01 * depth_diff[depth_diff > 0 - 0.00001].mean()
+            loss += inner_restrain_loss
+
+            # ratio = inner_opacity.shape[0] / inner_gaussians.get_opacity.shape[0]
+        # <end>
+        # ratio = (inner_gaussians.get_sign < 0).sum() / inner_gaussians.get_sign.shape[0]
         
+
         # scale loss
         if visibility_filter.sum() > 0:
             scale = gaussians.get_scaling[visibility_filter]
             sorted_scale, _ = torch.sort(scale, dim=-1)
             min_scale_loss = sorted_scale[...,0]
-            loss += 100.0 * min_scale_loss.mean()
-
-        # mask loss
-        # rendered_alpha = render_pkg["alpha"].squeeze()
-        # gt_mask = viewpoint_cam.mask.float()
-        # mask_loss = F.l1_loss(rendered_alpha, gt_mask)
-        # loss += mask_loss
-
-
+            loss += opt.scale_loss_weight * min_scale_loss.mean()
         # single-view loss
         if iteration > opt.single_view_weight_from_iter:
-            weight = opt.single_view_weight
+            # mask loss
+            mask = viewpoint_cam.mask.float()
+            loss_mask = l1_loss(render_pkg['alpha'], mask)
+            loss += 0.05 * loss_mask + 0.9 * min((iteration - opt.single_view_weight_from_iter) / (80000 - opt.single_view_weight_from_iter), 1.0)
+
             normal = render_pkg["rendered_normal"]
             depth_normal = render_pkg["depth_normal"]
 
-            depth = render_pkg["plane_depth"].squeeze()
-            depth = depth.detach().cpu()
-            depth = -depth.clip(0, 3)
-            depth_i = (depth - depth.min()) / ( depth.max()- depth.min() + 1e-20)
-            depth_i = depth_i.unsqueeze(0).repeat(3,1,1)
+            # normal = F.normalize(normal, dim=0)
+            # depth_normal = F.normalize(depth_normal, dim=0)
 
             image_weight = (1.0 - get_img_grad_weight(gt_image))
             image_weight = (image_weight).clamp(0,1).detach() ** 2
-            image_weight = erode(image_weight[None,None]).squeeze()
 
-            normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
-            loss += (normal_loss)
-
+            # normal_loss = weight * (1 - (F.cosine_similarity(depth_normal, normal, dim=0)).mean())
+            single_view_weight = opt.single_view_weight + 0.1 * min((iteration - opt.single_view_weight_from_iter) / (80000 - opt.single_view_weight_from_iter), 1.0)
+            normal_loss = single_view_weight * ((((depth_normal - normal)).abs().sum(0))).mean()
+            loss += normal_loss
+                    
             
-            if use_neus_sdf:
-                # update_step
-                neusModel.update_step(iteration, iteration)
-
-                # print(neusModel.inner_sigma)
-
-                # generate rays for neus
-                w = viewpoint_cam.image_width
-                h = viewpoint_cam.image_height
-                directions = viewpoint_cam.get_rays()
-                x = torch.randint(0, w, size=(train_num_rays,), device='cuda')
-                y = torch.randint(0, h, size=(train_num_rays,), device='cuda')
-                directions = directions[y,x]
-                rays_d = torch.matmul(directions, viewpoint_cam.c2w[:3, :3])
-                rays_o = viewpoint_cam.camera_center.unsqueeze(0).expand(rays_d.shape[0], -1)
-                rays = torch.cat([rays_o, F.normalize(rays_d, p=2, dim=-1)], dim=-1)
-
-                output_neus = neusModel(rays)
-
-                rays_valid = output_neus['rays_valid'].squeeze() # [N_rays, ]
-                neus_rgb = output_neus['comp_rgb'][rays_valid]
-                neus_depth = output_neus['depth'][rays_valid] # [Valid_rays, ] attention: the depth means the distance from camera center to surface point!!!
-                neus_sdf = output_neus['sdf_grad_samples']
-                neus_rgb_inner = output_neus['inner_rgb'][rays_valid]
-                neus_rendered_normal = output_neus['comp_normal'][rays_valid]
-                neus_opacity_in = output_neus['opacity_in'][rays_valid]
-
-                # loss for neus-sdf
-                GT_image_ray = gt_image.squeeze()[:,y,x].permute(1,0)[rays_valid].detach()
-                GS_distance = render_pkg["rendered_distance"].detach().squeeze()[y, x][rays_valid] # [Valid_rays, ]
-                GS_normal = render_pkg["rendered_normal"][:, y, x].detach().permute(1,0)[rays_valid]
-
-                neus_rgb_final = 0.7 * neus_rgb + 0.3 * neus_rgb_inner
-                loss_neus_rgb_diff = F.l1_loss(GT_image_ray, neus_rgb)
-                
-                
-                if iteration < 7200:
-                    depthRatio = 2.0
-                elif iteration < 8000:
-                    depthRatio = 1.0
-                else:
-                    depthRatio = 0.5
-                filter_thres = neusModelConfig.model.radius * 2
-                depth_diff = (GS_distance - neus_depth.squeeze()).abs()
-                depth_diff[depth_diff > filter_thres] = 0
-                loss_neus_depth_diff = depth_diff.sum() / ((depth_diff > 0.0).sum() + 1e-8) 
-                # loss_neus_depth_diff = F.l1_loss(GS_depth, neus_depth.squeeze())
-
-                if iteration > 8000:
-                    loss_neus_normal_diff = F.l1_loss(neus_rendered_normal, GS_normal)
-                else:
-                    loss_neus_normal_diff = 0.0
-                
-                loss_neus_eikonal = ((torch.linalg.norm(neus_sdf, ord=2, dim=-1) - 1.0)**2).mean()
-
-                loss_neus = loss_neus_rgb_diff + 0.01 * loss_neus_depth_diff + 0.01 * loss_neus_normal_diff + loss_neus_eikonal
-
-                loss += 0.1 * loss_neus
 
             if gaussians.use_pbr:
                 rendered_pbr = render_pkg["pbr"]
                 rendered_base_color = render_pkg["base_color"]
-                rendered_normal_p = render_pkg["rendered_normal_p"]
                 rendered_roughness = render_pkg["roughness"]
-                rendered_diffuse = render_pkg["diffuse"]
+                rendered_scatter = render_pkg["scatter"]
                 rendered_specular = render_pkg["specular"]
-                
+
                 Ll1_pbr = F.l1_loss(rendered_pbr, gt_image)
                 ssim_val_pbr = ssim(rendered_pbr, gt_image)
-                loss_pbr = (1.0 - 0.2) * Ll1_pbr + 0.2 * (1.0 - ssim_val_pbr)
+                loss_pbr = (1.0 - opt.lambda_dssim) * Ll1_pbr + opt.lambda_dssim * (1.0 - ssim_val_pbr)
                 
-                loss_base_color_smooth = first_order_edge_aware_loss(rendered_base_color, gt_image)
-                loss_roughness_smooth = first_order_edge_aware_loss(rendered_roughness.unsqueeze(0), gt_image)
-                
-                # loss_p = F.l1_loss(rendered_normal_p, normal)
-                # loss_p = (rendered_normal_p - normal).abs().mean()
-                
-                # if iteration > opt.single_view_weight_from_iter + 1200:
-                #     loss += loss_pbr
-                #     loss += 0.01 * loss_base_color_smooth
-                #     loss += 0.01 * loss_roughness_smooth
-                
-                # if iteration > opt.single_view_weight_from_iter + 500:
-                #     loss += 0.01 * loss_p
+                loss_base_color_smooth = first_order_edge_aware_loss(rendered_base_color * mask, gt_image)
+                loss_roughness_smooth = first_order_edge_aware_loss(rendered_roughness.unsqueeze(0) * mask, gt_image)
 
-                # if use_neus_sdf:
-                #     gs_opacity_in = rendered_opacity_in[y, x][rays_valid]
-                #     loss_opacity_in = F.l1_loss(neus_opacity_in.squeeze().detach(), gs_opacity_in)
-                #     loss += loss_opacity_in
-                
-                debug_img_r1 = torch.cat([image.detach().cpu(), rendered_specular.detach().cpu(), rendered_pbr.detach().cpu(), render_pkg['render1'].detach().cpu()], dim=2)
-                debug_img_r2 = torch.cat([gt_image.detach().cpu(), ((normal + 1.0)*0.5).clamp(0,1).detach().cpu(), rendered_diffuse.detach().cpu(), render_pkg['alpha'].squeeze().detach().unsqueeze(0).repeat(3,1,1).cpu()], dim=2)
-                debug_img = torch.cat([debug_img_r1, debug_img_r2], dim=1)
+                weight = 1.1
+                if iteration > opt.single_view_weight_from_iter + inner_gs_start + 1000:
+                    loss += weight * loss_pbr
+                    loss += 0.01 * loss_base_color_smooth
+                    loss += 0.01 * loss_roughness_smooth
 
-                if iteration % 10 == 0:
-                    utils.save_image(debug_img, './debug/depth.png', nrow=1)
-            
 
         # multi-view loss
         if iteration > opt.multi_view_weight_from_iter:
@@ -394,241 +313,188 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             [pts_in_view_cam[:,0] * viewpoint_cam.Fx / pts_in_view_cam[:,2] + viewpoint_cam.Cx,
                             pts_in_view_cam[:,1] * viewpoint_cam.Fy / pts_in_view_cam[:,2] + viewpoint_cam.Cy], -1).float()
                 pixel_noise = torch.norm(pts_projections - pixels.reshape(*pts_projections.shape), dim=-1)
+                
                 d_mask = d_mask & (pixel_noise < pixel_noise_th)
                 weights = (1.0 / torch.exp(pixel_noise)).detach()
                 weights[~d_mask] = 0
-                if iteration % 200 == 0:
-                    gt_img_show = ((gt_image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
-                    if 'app_image' in render_pkg:
-                        img_show = ((render_pkg['app_image']).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
-                    else:
-                        img_show = ((image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
-                    normal_show = (((normal+1.0)*0.5).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
-                    depth_normal_show = (((depth_normal+1.0)*0.5).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
-                    d_mask_show = (weights.float()*255).detach().cpu().numpy().astype(np.uint8).reshape(H,W)
-                    d_mask_show_color = cv2.applyColorMap(d_mask_show, cv2.COLORMAP_JET)
-                    depth = render_pkg['plane_depth'].squeeze().detach().cpu().numpy()
-                    depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
-                    depth_i = (depth_i * 255).clip(0, 255).astype(np.uint8)
-                    depth_color = cv2.applyColorMap(depth_i, cv2.COLORMAP_JET)
-                    row0 = np.concatenate([gt_img_show, img_show, normal_show], axis=1)
-                    row1 = np.concatenate([d_mask_show_color, depth_color, depth_normal_show], axis=1)
-                    image_to_show = np.concatenate([row0, row1], axis=0)
-                    cv2.imwrite(os.path.join(debug_path, "%05d"%iteration + "_" + viewpoint_cam.image_name + ".jpg"), image_to_show)
-
+                
+                
                 if d_mask.sum() > 0:
                     geo_loss = geo_weight * ((weights * pixel_noise)[d_mask]).mean()
                     loss += geo_loss
-                    if use_virtul_cam is False:
-                        with torch.no_grad():
-                            ## sample mask
-                            d_mask = d_mask.reshape(-1)
-                            valid_indices = torch.arange(d_mask.shape[0], device=d_mask.device)[d_mask]
-                            if d_mask.sum() > sample_num:
-                                index = np.random.choice(d_mask.sum().cpu().numpy(), sample_num, replace = False)
-                                valid_indices = valid_indices[index]
-
-                            weights = weights.reshape(-1)[valid_indices]
-                            ## sample ref frame patch
-                            pixels = pixels.reshape(-1,2)[valid_indices]
-                            offsets = patch_offsets(patch_size, pixels.device)
-                            ori_pixels_patch = pixels.reshape(-1, 1, 2) / viewpoint_cam.ncc_scale + offsets.float()
-                            
-                            H, W = gt_image_gray.squeeze().shape
-                            pixels_patch = ori_pixels_patch.clone()
-                            pixels_patch[:, :, 0] = 2 * pixels_patch[:, :, 0] / (W - 1) - 1.0
-                            pixels_patch[:, :, 1] = 2 * pixels_patch[:, :, 1] / (H - 1) - 1.0
-                            ref_gray_val = F.grid_sample(gt_image_gray.unsqueeze(1), pixels_patch.view(1, -1, 1, 2), align_corners=True)
-                            ref_gray_val = ref_gray_val.reshape(-1, total_patch_size)
-
-                            ref_to_neareast_r = nearest_cam.world_view_transform[:3,:3].transpose(-1,-2) @ viewpoint_cam.world_view_transform[:3,:3]
-                            ref_to_neareast_t = -ref_to_neareast_r @ viewpoint_cam.world_view_transform[3,:3] + nearest_cam.world_view_transform[3,:3]
-
-                        ## compute Homography
-                        ref_local_n = render_pkg["rendered_normal"].permute(1,2,0)
-                        ref_local_n = ref_local_n.reshape(-1,3)[valid_indices]
-
-                        ref_local_d = render_pkg['rendered_distance'].squeeze()
-                        # rays_d = viewpoint_cam.get_rays()
-                        # rendered_normal2 = rendered_normal.reshape(-1,3)
-                        # ref_local_d = render_pkg['plane_depth'].view(-1) * ((rendered_normal2 * rays_d.reshape(-1,3)).sum(-1).abs())
-                        # ref_local_d = ref_local_d.reshape(H,W)
-
-                        ref_local_d = ref_local_d.reshape(-1)[valid_indices]
-                        H_ref_to_neareast = ref_to_neareast_r[None] - \
-                            torch.matmul(ref_to_neareast_t[None,:,None].expand(ref_local_d.shape[0],3,1), 
-                                        ref_local_n[:,:,None].expand(ref_local_d.shape[0],3,1).permute(0, 2, 1))/ref_local_d[...,None,None]
-                        H_ref_to_neareast = torch.matmul(nearest_cam.get_k(nearest_cam.ncc_scale)[None].expand(ref_local_d.shape[0], 3, 3), H_ref_to_neareast)
-                        H_ref_to_neareast = H_ref_to_neareast @ viewpoint_cam.get_inv_k(viewpoint_cam.ncc_scale)
-                        
-                        ## compute neareast frame patch
-                        grid = patch_warp(H_ref_to_neareast.reshape(-1,3,3), ori_pixels_patch)
-                        grid[:, :, 0] = 2 * grid[:, :, 0] / (W - 1) - 1.0
-                        grid[:, :, 1] = 2 * grid[:, :, 1] / (H - 1) - 1.0
-                        _, nearest_image_gray = nearest_cam.get_image()
-                        sampled_gray_val = F.grid_sample(nearest_image_gray[None], grid.reshape(1, -1, 1, 2), align_corners=True)
-                        sampled_gray_val = sampled_gray_val.reshape(-1, total_patch_size)
-                        
-                        ## compute loss
-                        ncc, ncc_mask = lncc(ref_gray_val, sampled_gray_val)
-                        mask = ncc_mask.reshape(-1)
-                        ncc = ncc.reshape(-1) * weights
-                        ncc = ncc[mask].squeeze()
-
-                        # if mask.sum() > 0:
-                        #     ncc_loss = ncc_weight * ncc.mean()
-                        #     loss += ncc_loss
 
         loss.backward()
         iter_end.record()
 
         with torch.no_grad():
+            # visualization
+            if iteration > opt.single_view_weight_from_iter and iteration % 200 == 0:
+                gt_img_show = ((gt_image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+                if 'app_image' in render_pkg:
+                    img_show = ((render_pkg['app_image']).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+                else:
+                    img_show = ((image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+                normal_show = (((normal+1.0)*0.5).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
+                depth_normal_show = (((depth_normal+1.0)*0.5).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
+
+                depth = render_pkg['plane_depth'].squeeze().detach().cpu().numpy()
+                depth_i = (depth - depth.min()) / (depth.max() - depth.min() + 1e-20)
+                depth_i = (depth_i * 255).clip(0, 255).astype(np.uint8)
+                depth_color = cv2.applyColorMap(depth_i, cv2.COLORMAP_JET)
+                distance = render_pkg['rendered_distance'].squeeze().detach().cpu().numpy()
+                distance_i = (distance - distance.min()) / (distance.max() - distance.min() + 1e-20)
+                distance_i = (distance_i * 255).clip(0, 255).astype(np.uint8)
+                distance_color = cv2.applyColorMap(distance_i, cv2.COLORMAP_JET)
+                image_weight = image_weight.detach().cpu().numpy()
+                image_weight = (image_weight * 255).clip(0, 255).astype(np.uint8)
+                image_weight_color = cv2.applyColorMap(image_weight, cv2.COLORMAP_JET)
+                specular_show = ((rendered_specular).permute(1,2,0).clamp(0,1)*255).detach().cpu().numpy().astype(np.uint8)
+                pbr_show = ((rendered_pbr).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+                scatter_show = ((rendered_scatter).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+                alpha_show = (render_pkg["alpha"].repeat(3,1,1).permute(1,2,0).clamp(0,1) * 255).detach().cpu().numpy().astype(np.uint8)
+                row0 = np.concatenate([gt_img_show, img_show, normal_show, distance_color, specular_show], axis=1)
+                row1 = np.concatenate([alpha_show, depth_color, depth_normal_show, scatter_show, pbr_show], axis=1)
+                image_to_show = np.concatenate([row0, row1], axis=0)
+                cv2.imwrite(os.path.join(debug_path, "%05d"%iteration + "_" + viewpoint_cam.image_name + ".jpg"), image_to_show)
+            
+            
+            # if iteration < opt.single_view_weight_from_iter and iteration % 500 == 0:
+            #     gt_img_show = ((gt_image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+            #     img_show = ((image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
+            #     res = np.concatenate([gt_img_show, img_show], axis=1)
+            #     cv2.imwrite(os.path.join(debug_path, "%05d"%iteration + "_" + viewpoint_cam.image_name + ".jpg"), res)
 
             # Progress bar
             ema_loss_for_log = 0.4 * image_loss.item() + 0.6 * ema_loss_for_log
             ema_single_view_for_log = 0.4 * normal_loss.item() if normal_loss is not None else 0.0 + 0.6 * ema_single_view_for_log
             ema_multi_view_geo_for_log = 0.4 * geo_loss.item() if geo_loss is not None else 0.0 + 0.6 * ema_multi_view_geo_for_log
             ema_multi_view_pho_for_log = 0.4 * ncc_loss.item() if ncc_loss is not None else 0.0 + 0.6 * ema_multi_view_pho_for_log
+            ema_pbr_loss_for_log = 0.4 * loss_pbr.item() if loss_pbr is not None else 0.0 + 0.6 * ema_multi_view_pho_for_log
             if iteration % 10 == 0:
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
                     "Single": f"{ema_single_view_for_log:.{5}f}",
-                    "Geo": f"{ema_multi_view_geo_for_log:.{5}f}",
-                    "Pho": f"{ema_multi_view_pho_for_log:.{5}f}",
+                    "pbr": f"{ema_pbr_loss_for_log:.{5}f}",
+                    "light": f"{direct_light.colocated_light.item():.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}",
-                    "inner_Points": f"{len(inner_gaussians.get_xyz)}"
+                    "inner": f"{len(inner_gaussians.get_xyz)}",
+                    "ratio": f"{ratio:.{5}f}",
                 }
                 progress_bar.set_postfix(loss_dict)
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-            
-            loss_pbr_log = loss_pbr.item() if loss_pbr is not None else 0.0
-            loss_p_log = loss_p.item() if loss_p is not None else 0.0
-            loss_opacity_in_log = loss_opacity_in.item() if loss_opacity_in is not None else 0.0
-            
-            loss_neus_rgb_diff_log = loss_neus_rgb_diff.item() if loss_neus_rgb_diff is not None else 0.0
-            loss_depth_diff_log = loss_neus_depth_diff.item() if loss_neus_depth_diff is not None else 0.0
-            loss_neus_eikonal_log = loss_neus_eikonal.item() if loss_neus_eikonal is not None else 0.0
 
-            scene_name = dataset.model_path.split('/')[1]
-            with open('./debug/loss_data.txt', '+a') as f:
-                f.write(f'{image_loss.item()}, {loss_pbr_log}, {loss_p_log}, {loss_opacity_in_log}, {loss_neus_rgb_diff_log}, {loss_depth_diff_log}, {direct_env_light.colocated_light.item()}\n')
-
-            # Log and save
-            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), app_model)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-
-            # evaluation
-            # if iteration % 1000 == 0:
-            #     # evaluation
-            #     train_views = scene.getTrainCameras()
-            #     psnrs_rgb_train = []
-            #     psnrs_pbr_train = []
-            #     for view in train_views:
-            #         gt, _ = view.get_image()
-            #         out = render(view, gaussians, pipe, background, app_model=app_model, return_pbr=True, dict_params=pbr_kwargs)
-
-            #         if iteration > opt.single_view_weight_from_iter:
-            #             rgb = out['render1']
-            #             pbr = out['pbr']
-            #         else:
-            #             rgb = out['render']
-            #             pbr = out['render']
-
-            #         psnrs_rgb_train.append(psnr(rgb, gt).mean().item())
-            #         psnrs_pbr_train.append(psnr(pbr, gt).mean().item())
-
-            #     test_views = scene.getTestCameras()
-            #     psnrs_rgb_test = []
-            #     psnrs_pbr_test = []
-            #     for i, view in enumerate(test_views):
-            #         gt, _ = view.get_image()
-            #         out = render(view, gaussians, pipe, background, app_model=app_model, return_pbr=True, dict_params=pbr_kwargs)
-
-            #         if iteration > opt.single_view_weight_from_iter:
-            #             rgb = out['render1']
-            #             pbr = out['pbr']
-            #         else:
-            #             rgb = out['render']
-            #             pbr = out['render']
-
-
-            #         psnrs_rgb_test.append(psnr(rgb, gt).mean().item())
-            #         psnrs_pbr_test.append(psnr(pbr, gt).mean().item())
-                
-            #     with open('./debug/psnr_log_{}.txt'.format(scene_name), '+a') as f:
-            #         f.write(f"psnr_rgb_train: {torch.tensor(psnrs_rgb_train).mean().item()} psnr_pbr_train: {torch.tensor(psnrs_pbr_train).mean().item()}")
-            #         f.write(f"psnr_rgb_test: {torch.tensor(psnrs_rgb_test).mean().item()} psnr_pbr_test: {torch.tensor(psnrs_pbr_test).mean().item()}\n")
-
-
-            # Densification
-            if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                mask = (render_pkg["out_observe"] > 0) & visibility_filter
-                gaussians.max_radii2D[mask] = torch.max(gaussians.max_radii2D[mask], radii[mask])
-                gaussians.add_densification_stats(viewspace_point_tensor, render_pkg["viewspace_points_abs"], visibility_filter)
-                
-                if iteration > opt.single_view_weight_from_iter + 800:
-                    inner_mask = (render_pkg["inner_observe"] > 0) & render_pkg["inner_vis_filter"]
-                    inner_gaussians.max_radii2D[inner_mask] = torch.max(inner_gaussians.max_radii2D[inner_mask], render_pkg["inner_radii"][inner_mask])
-                    inner_gaussians.add_densification_stats(render_pkg["inner_viewspace_points"], render_pkg["inner_viewspace_points_abs"], render_pkg["inner_vis_filter"])
-
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
-                    if iteration > opt.single_view_weight_from_iter + 800:
-                        inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
             
-            # multi-view observe trim
-            if opt.use_multi_view_trim and iteration % 1000 == 0 and iteration < opt.densify_until_iter:
-                observe_the = 2
-                observe_cnt = torch.zeros_like(gaussians.get_opacity)
-                for view in scene.getTrainCameras():
-                    render_pkg_tmp = render(view, gaussians, pipe, bg, app_model=app_model, return_plane=False, return_depth_normal=False)
-                    out_observe = render_pkg_tmp["out_observe"]
-                    observe_cnt[out_observe > 0] += 1
-                prune_mask = (observe_cnt < observe_the).squeeze()
-                if prune_mask.sum() > 0:
-                    gaussians.prune_points(prune_mask)
+            # <start> modify 2025-03-17
+            # Densification
+            if use_density_prune:
+                if iteration < opt.densify_until_iter:
+                    # Keep track of max radii in image-space for pruning
+                    mask = (render_pkg["out_observe"] > 0) & visibility_filter
+                    gaussians.max_radii2D[mask] = torch.max(gaussians.max_radii2D[mask], radii[mask])
+                    gaussians.add_densification_stats(viewspace_point_tensor, render_pkg["viewspace_points_abs"], visibility_filter)
 
-            # reset_opacity
-            if iteration < opt.densify_until_iter:
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
-                    if iteration > opt.single_view_weight_from_iter + 800:
-                        inner_gaussians.reset_opacity()
+                    if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        inner_mask = (render_pkg["inner_observe"] > 0) & render_pkg["inner_vis_filter"]
+                        inner_gaussians.max_radii2D[inner_mask] = torch.max(inner_gaussians.max_radii2D[inner_mask], render_pkg["inner_radii"][inner_mask])
+                        inner_gaussians.add_densification_stats(render_pkg["inner_viewspace_points"], render_pkg["inner_viewspace_points_abs"], render_pkg["inner_vis_filter"])
 
-            # Optimizer step
-            if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                app_model.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
-                app_model.optimizer.zero_grad(set_to_none = True)
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
+                        
+                        # if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        #     dead_mask = ((inner_gaussians.get_opacity).abs() <= 0.005).squeeze(-1)
+                        #     inner_gaussians.relocate_gs(dead_mask=dead_mask)
+                        #     inner_gaussians.add_new_gs(cap_max=20000)
 
-                # inner_gaussians.optimizer.step()
-                # inner_gaussians.optimizer.zero_grad(set_to_none = True)
+                        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                            inner_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_abs_grad_threshold, opt.opacity_cull_threshold, scene.cameras_extent, size_threshold)
+            
+                # multi-view observe trim
+                if opt.use_multi_view_trim and iteration % 1000 == 0 and iteration < opt.densify_until_iter:
+                    observe_the = 2
+                    observe_cnt = torch.zeros_like(gaussians.get_opacity)
+                    for view in scene.getTrainCameras():
+                        render_pkg_tmp = render(view, gaussians, pipe, bg, app_model=app_model, return_plane=False, return_depth_normal=False)
+                        out_observe = render_pkg_tmp["out_observe"]
+                        observe_cnt[out_observe > 0] += 1
+                    prune_mask = (observe_cnt < observe_the).squeeze()
+                    if prune_mask.sum() > 0:
+                        gaussians.prune_points(prune_mask)
 
-                # if gaussians.use_pbr:
-                #     direct_env_light.step()
+                # reset_opacity
+                if iteration < reset_opacity_until_iter:
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        gaussians.reset_opacity()
+                        if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                            inner_gaussians.reset_opacity()
 
-                if use_neus_sdf and iteration > opt.single_view_weight_from_iter:
-                    neusOptimizer.step()
-                    neusOptimizer.zero_grad(set_to_none = True)
-                    neusScheduler.step()
+                # Optimizer step
+                if iteration < opt.iterations:
+                    gaussians.optimizer.step()
+                    app_model.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none = True)
+                    app_model.optimizer.zero_grad(set_to_none = True)
 
+                    if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        inner_gaussians.optimizer.step()
+                        inner_gaussians.optimizer.zero_grad(set_to_none = True)
+
+                        inner_gaussians.add_noise(xyz_lr)
+
+                    if gaussians.use_pbr:
+                        direct_light.step()
+
+            else:
+                if iteration < opt.densify_until_iter and iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    dead_mask = (gaussians.get_opacity.abs() <= 0.005).squeeze(-1)
+                    gaussians.relocate_gs(dead_mask=dead_mask)
+                    gaussians.add_new_gs(cap_max=100000)
+
+                    if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        dead_mask = (inner_gaussians.get_opacity <= 0.005).squeeze(-1)
+                        inner_gaussians.relocate_gs(dead_mask=dead_mask)
+                        inner_gaussians.add_new_gs(cap_max=-1)
+                
+                if iteration < opt.iterations:
+                    gaussians.optimizer.step()
+                    app_model.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none = True)
+                    app_model.optimizer.zero_grad(set_to_none = True)
+
+                    gaussians.add_noise(xyz_lr)
+
+                    if use_inner_gs and iteration > opt.single_view_weight_from_iter + inner_gs_start:
+                        inner_gaussians.optimizer.step()
+                        inner_gaussians.optimizer.zero_grad(set_to_none = True)
+
+                        inner_gaussians.add_noise(xyz_lr)
+
+                    if gaussians.use_pbr:
+                        direct_light.step()
+                    
+            # <end>
+
+            # if iteration % 100 == 0:
+            #     with open('./debug/point_num.txt', '+a') as f:
+            #         ratio = (inner_gaussians.get_opacity < 0).sum() / inner_gaussians.get_xyz.shape[0] + 1e-8 
+            #         f.write(f"{gaussians.get_xyz.shape[0]}, {inner_gaussians.get_xyz.shape[0]}, {ratio}\n")
+            
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 app_model.save_weights(scene.model_path, iteration)
-                torch.save((direct_env_light.capture(), iteration), scene.model_path + '/env_light' + str(iteration) + '.pth')
+                torch.save((direct_light.capture(), iteration), scene.model_path + '/env_light' + str(iteration) + '.pth')
                 torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
-
-            if iteration % 500 == 0:
-                torch.cuda.empty_cache()
+            # if iteration == 33000:
+            #     torch.save((inner_gaussians.capture(), iteration), scene.model_path + "/inner_chkpnt" + str(iteration) + ".pth")
     
+    app_model.save_weights(scene.model_path, opt.iterations)
     torch.cuda.empty_cache()
 
 def prepare_output_and_logger(args):    
@@ -708,9 +574,9 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-100)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 8000, 9000, 10000, 30_000, 40000, 50000, 60000, 80000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000, 90_000, 100_000, 110_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000, 50_000, 70000, 80_000, 90_000, 100_000, 110_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -720,15 +586,10 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    checkpoint_iterations = [100,2000, 3000,7000,10000,20000,30000, 40000, 50000, 60000, 80000]
-
-    start_checkpoint = os.path.join(args.model_path, "chkpnt30000.pth")
-    # start_checkpoint = None
     # Start GUI server, configure and run training
     # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    args.eval = True
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, checkpoint_iterations, start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
     print("\nTraining complete.")

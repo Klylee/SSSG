@@ -7,12 +7,8 @@ The code is under orgnizing.
 
 The repository contains submodules, thus please check it out with 
 ```shell
-# SSH
-git clone git@github.com:zju3dv/PGSR.git
-cd PGSR
-
 conda create -n pgsr python=3.8
-conda activate pgsr
+conda activate sssg
 
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 #replace your cuda version
 pip install -r requirements.txt

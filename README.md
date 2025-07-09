@@ -7,7 +7,7 @@ The code is under orgnizing.
 
 The repository contains submodules, thus please check it out with 
 ```shell
-conda create -n pgsr python=3.8
+conda create -n sssg python=3.8
 conda activate sssg
 
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 #replace your cuda version
